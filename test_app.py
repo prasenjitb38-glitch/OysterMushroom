@@ -86,6 +86,11 @@ class AppTests(unittest.TestCase):
         with database.get_connection() as c:c.execute("UPDATE settings SET value='BILL' WHERE key='invoice_prefix'")
         self.assertEqual(self.SalesPage.generate_invoice_no(),"BILL-00001")
 
+    def test_web_app_loads_without_desktop_ui(self):
+        import web_app
+        response = web_app.app.test_client().get("/login")
+        self.assertEqual(response.status_code, 200)
+
     def test_gui_pages(self):
         try:
             import tkinter as tk, main

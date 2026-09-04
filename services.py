@@ -99,6 +99,28 @@ def batch_cost_rows():
     return result
 
 
+def validate_sale(qty, rate, discount, paid, available):
+    total = qty * rate - discount
+    if qty <= 0 or rate <= 0 or discount < 0 or total < 0 or paid < 0 or paid > total:
+        raise ValueError("Invalid sale values")
+    if qty > available:
+        raise OverflowError(f"Available stock: {available:.2f} Kg")
+    return total
+
+
+def generate_invoice_no():
+    prefix = setting("invoice_prefix", "INV") or "INV"
+    with get_connection() as conn:
+        rows = conn.execute("SELECT invoice_no FROM sales ORDER BY id DESC").fetchall()
+    largest = 0
+    for (invoice,) in rows:
+        try:
+            largest = max(largest, int(invoice.split("-")[-1]))
+        except (ValueError, AttributeError):
+            continue
+    return f"{prefix}-{largest + 1:05d}"
+
+
 def pnl(start=None, end=None):
     sale_where=""; expense_where=""; params=()
     if start and end:

@@ -46,6 +46,15 @@ def verify_password(password, stored):
         return False
 
 
+def authenticate(username, password):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id,password_hash,role,active,full_name FROM users WHERE username=?",
+            (username,),
+        ).fetchone()
+    return row if row and row[3] and verify_password(password, row[1]) else None
+
+
 def create_database():
     conn = get_connection()
     cursor = conn.cursor()

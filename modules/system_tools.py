@@ -5,7 +5,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
-from database import DB_FILE, get_connection, hash_password, verify_password
+from database import DB_FILE, authenticate, get_connection, hash_password, verify_password
 from services import setting
 
 
@@ -92,7 +92,3 @@ class UsersPage:
         self.load()
     def show(self):self.frame.pack(fill="both",expand=True)
 
-
-def authenticate(username,password):
-    with get_connection() as c:row=c.execute("SELECT id,password_hash,role,active,full_name FROM users WHERE username=?",(username,)).fetchone()
-    return row if row and row[3] and verify_password(password,row[1]) else None

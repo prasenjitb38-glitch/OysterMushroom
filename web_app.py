@@ -2,10 +2,15 @@ import os
 from functools import wraps
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
-from database import create_database, get_connection
-from modules.system_tools import authenticate
-from modules.sales import SalesPage
-from services import customer_outstanding, mushroom_stock, pnl, supplier_outstanding
+from database import authenticate, create_database, get_connection
+from services import (
+    customer_outstanding,
+    generate_invoice_no,
+    mushroom_stock,
+    pnl,
+    supplier_outstanding,
+    validate_sale,
+)
 
 create_database()
 app = Flask(__name__)
@@ -83,9 +88,9 @@ def sales():
     with get_connection() as c:
         if request.method == "POST":
             qty=float(request.form["quantity"]);rate=float(request.form["rate"]);discount=float(request.form.get("discount",0));paid=float(request.form.get("paid",0));total=qty*rate-discount
-            try: SalesPage.validate_sale(qty,rate,discount,paid,mushroom_stock())
+            try: validate_sale(qty,rate,discount,paid,mushroom_stock())
             except (ValueError,OverflowError) as e:flash(str(e),"error")
-            else:c.execute("INSERT INTO sales(invoice_no,sale_date,quantity_kg,rate_per_kg,discount,total_amount,paid_amount,payment_mode,notes) VALUES(?,?,?,?,?,?,?,?,?)",(SalesPage.generate_invoice_no(),request.form["date"],qty,rate,discount,total,paid,request.form["mode"],request.form.get("notes","")));flash("Sale saved.","success")
+            else:c.execute("INSERT INTO sales(invoice_no,sale_date,quantity_kg,rate_per_kg,discount,total_amount,paid_amount,payment_mode,notes) VALUES(?,?,?,?,?,?,?,?,?)",(generate_invoice_no(),request.form["date"],qty,rate,discount,total,paid,request.form["mode"],request.form.get("notes","")));flash("Sale saved.","success")
         rows=c.execute("SELECT invoice_no,sale_date,quantity_kg,rate_per_kg,total_amount,paid_amount,total_amount-paid_amount FROM sales ORDER BY id DESC").fetchall()
     return render_template("entry.html",title="Sales",kind="sales",rows=rows,stock=mushroom_stock())
 
