@@ -1,1 +1,35 @@
-{% extends 'base.html' %}{% block body %}<h1>{{ title }}</h1><form method="post" class="form" id="crud-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% for name,label,kind,options in fields %}<label data-field="{{name}}">{{ label }}{% if kind=='select' %}<select name="{{name}}" required>{% for option in options %}<option value="{{option[0]}}" {% if option|length>2 %}data-unit="{{option[2]}}"{% endif %} {% if values.get(name,'')|string==option[0]|string %}selected{% endif %}>{{option[1]}}</option>{% endfor %}</select>{% else %}<input type="{{kind}}" name="{{name}}" value="{{ values.get(name,'') if kind!='password' else '' }}" {% if kind=='number' %}min="0" step="0.01"{% endif %} {% if name not in ('notes','email','mobile','address','batch_no','expected_harvest_date','material_name') %}required{% endif %}>{% endif %}</label>{% endfor %}<div class="calculated"><strong id="calculated-total"></strong><span id="calculated-due"></span></div><button type="submit">💾 Save</button></form><script>const f=document.getElementById('crud-form');function material(){const m=f.elements.material_id,n=f.elements.material_name,u=f.elements.unit;if(!m||!n)return;const selected=m.options[m.selectedIndex],other=selected.text.trim().toLowerCase()==='other',label=n.closest('[data-field="material_name"]');label.hidden=!other;n.required=other;if(!other){n.value='';if(u&&selected.dataset.unit)u.value=selected.dataset.unit}}function calc(){const q=Number(f.elements.quantity?.value||0),r=Number(f.elements.rate?.value||0),p=Number(f.elements.paid_amount?.value||0),t=q*r;const box=document.getElementById('calculated-total'),due=document.getElementById('calculated-due');if(f.elements.quantity&&f.elements.rate){box.textContent=`Total: ${t.toFixed(2)}`;due.textContent=` Due: ${(t-p).toFixed(2)}`}}f.addEventListener('input',calc);f.elements.material_id?.addEventListener('change',material);material();calc()</script>{% endblock %}
+{% extends 'base.html' %}
+{% block body %}
+<h1>{{ title }}</h1>
+<form method="post" class="form" id="crud-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% for name,label,kind,options in fields %}
+  <label data-field="{{name}}">{{ label }}
+    {% if kind=='select' %}
+    <select name="{{name}}" {% if name not in ('batch_no','customer_id') and not (name=='batch_id' and resource in ('usage','adjustment')) %}required{% endif %}>
+      {% for option in options %}<option value="{{option[0]}}" {% if option|length>2 %}data-unit="{{option[2]}}"{% endif %} {% if values.get(name,'')|string==option[0]|string %}selected{% endif %}>{{option[1]}}</option>{% endfor %}
+    </select>
+    {% else %}
+    <input type="{{kind}}" name="{{name}}" value="{{ values.get(name,'') if kind!='password' else '' }}" {% if kind=='number' %}min="0" step="0.01"{% endif %} {% if name not in ('notes','email','mobile','address','batch_no','expected_harvest_date','material_name') %}required{% endif %}>
+    {% endif %}
+  </label>
+  {% endfor %}
+  <div class="calculated"><strong id="calculated-total"></strong><span id="calculated-due"></span></div>
+  <button type="submit">💾 Save</button>
+</form>
+<script>
+const f=document.getElementById('crud-form');
+function material(){
+  const m=f.elements.material_id,n=f.elements.material_name,u=f.elements.unit;if(!m||!n)return;
+  const selected=m.options[m.selectedIndex],other=selected.text.trim().toLowerCase()==='other',label=n.closest('[data-field="material_name"]');
+  label.hidden=!other;n.required=other;
+  if(!other){n.value='';if(u&&selected.dataset.unit)u.value=selected.dataset.unit}
+}
+function calc(){
+  const q=Number(f.elements.quantity?.value||0),r=Number(f.elements.rate?.value||0),p=Number(f.elements.paid_amount?.value||0),t=q*r;
+  const box=document.getElementById('calculated-total'),due=document.getElementById('calculated-due');
+  if(f.elements.quantity&&f.elements.rate){box.textContent=`Total: ${t.toFixed(2)}`;due.textContent=` Due: ${(t-p).toFixed(2)}`}
+}
+f.addEventListener('input',calc);f.elements.material_id?.addEventListener('change',material);material();calc();
+</script>
+{% endblock %}

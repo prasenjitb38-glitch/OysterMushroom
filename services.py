@@ -270,7 +270,7 @@ def save_purchase(data, record_id=None):
     enforce_desktop("purchases.edit" if record_id else "purchases.create")
     with get_connection() as conn:
         qty=float(data["quantity"]);rate=float(data["rate"]);paid=float(data.get("paid_amount",0));total=qty*rate
-        if qty<0 or rate<0 or paid<0 or paid>total:raise ValueError("Invalid purchase")
+        if qty<=0 or rate<0 or paid<0 or paid>total:raise ValueError("Invalid purchase")
         material_id=data.get("material_id")
         material=conn.execute("SELECT item,unit FROM raw_materials WHERE id=?",(material_id,)).fetchone()
         if not material:raise ValueError("Invalid material")

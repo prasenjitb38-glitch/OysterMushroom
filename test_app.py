@@ -367,10 +367,18 @@ class AppTests(unittest.TestCase):
         self.services.set_desktop_role("ADMIN");client=web_app.app.test_client()
         with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="other-token"
         with database.get_connection() as c:
-            supplier=c.execute("INSERT INTO suppliers(name) VALUES('Other Supplier')").lastrowid;other=c.execute("SELECT id FROM raw_materials WHERE LOWER(TRIM(item))='other'").fetchone()[0];polybag=c.execute("SELECT id FROM raw_materials WHERE item='Polybag'").fetchone()[0]
+            supplier=c.execute("INSERT INTO suppliers(name) VALUES('Cash')").lastrowid;other=c.execute("SELECT id FROM raw_materials WHERE LOWER(TRIM(item))='other'").fetchone()[0];polybag=c.execute("SELECT id FROM raw_materials WHERE item='Polybag'").fetchone()[0]
         def post(path,**data):data["csrf_token"]="other-token";response=client.post(path,data=data);self.assertEqual(response.status_code,302,(path,response.get_data(as_text=True)));return response
         def purchase(invoice,name,quantity,unit="Kg",material_id=None):post("/manage/purchase/new",purchase_date="2026-09-05",purchase_invoice=invoice,supplier_id=str(supplier),material_id=str(material_id or other),material_name=name,batch_no="",quantity=str(quantity),unit=unit,rate="5",paid_amount="0",payment_mode="Credit",notes="")
-        form=client.get("/manage/purchase/new").get_data(as_text=True);self.assertIn("Material Name",form);self.assertIn("data-unit=",form);self.assertIn("n.required=other",form)
+        form=client.get("/manage/purchase/new").get_data(as_text=True);self.assertIn("Material Name",form);self.assertIn("data-unit=",form);self.assertIn("n.required=other",form);self.assertIn('value="Pcs"',form);self.assertIn('value="Piece"',form)
+        import re
+        batch_select=re.search(r'<select name="batch_no"([^>]*)>',form);self.assertIsNotNone(batch_select);self.assertNotIn("required",batch_select.group(1))
+        post("/manage/purchase/new",purchase_date="2026-09-05",purchase_invoice="FOGGER-1",supplier_id=str(supplier),material_id=str(other),material_name="Fogger Kit",batch_no="",quantity="1",unit="Piece",rate="3400",paid_amount="3400",payment_mode="Cash",notes="")
+        with database.get_connection() as c:
+            fogger=c.execute("SELECT id,item,unit FROM raw_materials WHERE item='Fogger Kit'").fetchone();fog_purchase=c.execute("SELECT id,total_amount,due_amount,unit FROM purchases WHERE purchase_invoice='FOGGER-1'").fetchone();self.assertEqual(fog_purchase[1:],(3400.0,0.0,"Piece"));self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_table='purchases' AND source_id=?",(fog_purchase[0],)).fetchone()[0],1)
+        self.assertEqual(self.services.raw_material_stock(fogger[0]),1);self.assertEqual(self.services.cash_balance("Cash"),-3400)
+        purchase("PCS-1","Plastic Clip",2,"Pcs")
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT unit FROM raw_materials WHERE item='Plastic Clip'").fetchone()[0],"Pcs")
         purchase("OTHER-1","Wood Dust",50)
         with database.get_connection() as c:
             rows=[r for r in c.execute("SELECT id,item,unit FROM raw_materials") if " ".join(r[1].split()).casefold()=="wood dust"];self.assertEqual(len(rows),1);material_id=rows[0][0];self.assertEqual(rows[0][2],"Kg");first=c.execute("SELECT id,item,unit FROM purchases WHERE purchase_invoice='OTHER-1'").fetchone();self.assertEqual((first[1],first[2]),("Wood Dust","Kg"))
