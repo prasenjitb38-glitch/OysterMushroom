@@ -46,7 +46,7 @@ def csrf_context():
     return {"csrf_token":session["csrf_token"],"navigation":nav}
 
 NAV_ITEMS=(
- ("🏠 Dashboard","dashboard","dashboard"),("🌱 Production","production","production.create"),("🍄 Harvest","harvest","harvest.create"),("📦 Stock","stock","stock.view"),("🛒 Sales","sales","sales.create"),("🧪 Raw Materials","raw_materials_web","raw_materials"),("🧺 Purchases","purchases_web","purchases"),("💰 Expenses","expenses_web","expenses"),("👥 Customers","customers_web","customers.view"),("🚚 Suppliers","suppliers_web","suppliers"),("👷 Labour","labour_web","labour"),("💳 Payments","payments_web","payments"),("🏦 Cash / Bank","ledger_web","ledger"),("📈 Profit & Loss","pnl_web","reports"),("📊 Reports","reports_web","reports"),("📉 Charts","charts_web","charts"),("🧾 Invoices","invoices_web","sales.create"),("⚙ Settings","settings_web","settings"),("🔐 Users","users_web","users"),("💾 Backup / Restore","backup_web","backup_restore"))
+ ("🏠 Dashboard","dashboard","dashboard"),("🌱 Production","production","production.create"),("🍄 Harvest","harvest","harvest.create"),("📦 Stock","stock","stock.view"),("🛒 Sales","sales","sales.create"),("🧪 Raw Materials","raw_materials_web","raw_materials"),("🧺 Purchases","purchases_web","purchases"),("💰 Expenses","expenses_web","expenses"),("👥 Customers","customers_web","customers.view"),("🚚 Suppliers","suppliers_web","suppliers"),("👷 Labour","labour_web","labour"),("💳 Payments","payments_web","payments"),("🏦 Cash / Bank","ledger_web","ledger"),("🧮 Batch Cost","batch_cost_web","batch_cost"),("📈 Profit & Loss","pnl_web","reports"),("📊 Reports","reports_web","reports"),("📉 Charts","charts_web","charts"),("🧾 Invoices","invoices_web","sales.create"),("⚙ Settings","settings_web","settings"),("🔐 Users","users_web","users"),("💾 Backup / Restore","backup_web","backup_restore"))
 
 
 def login_required(view):
@@ -215,6 +215,12 @@ def payments_web():
 @app.route("/cash-bank")
 @permission("ledger")
 def ledger_web():return table_page("Cash / Bank Ledger",("Date","Type","Reference","Mode","Outflow","Inflow"),"SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger ORDER BY id DESC")
+
+@app.route("/batch-cost")
+@permission("batch_cost")
+def batch_cost_web():
+    from services import batch_cost_rows
+    return render_template("module_web.html",title="Batch Cost",headers=("Batch","Date","Bags","Production","Wastage","Saleable","Total Cost","Cost/Bag","Cost/Kg","Expected Sales","Expected Profit"),rows=batch_cost_rows())
 
 @app.route("/profit-loss")
 @permission("reports")

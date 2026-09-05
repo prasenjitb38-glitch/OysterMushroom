@@ -297,13 +297,13 @@ def delete_source_record(table,record_id):
 
 def save_batch(data,batch_id=None):
     enforce_desktop("production.edit" if batch_id else "production.create")
-    vals=(data["batch_no"].strip(),data["production_date"],float(data.get("straw_qty",0)),float(data.get("spawn_qty",0)),int(data.get("bag_count",0)),float(data.get("expected_yield",0)),data.get("expected_harvest_date") or None,data.get("status","Preparing"),data.get("notes",""))
-    if not vals[0] or min(vals[2],vals[3],vals[4],vals[5])<0:raise ValueError("Invalid batch")
+    vals=(data["batch_no"].strip(),data["production_date"],data.get("straw_type",""),float(data.get("straw_qty",0)),float(data.get("spawn_qty",0)),int(data.get("bag_count",0)),float(data.get("bag_size",0)),float(data.get("expected_yield",0)),data.get("expected_harvest_date") or None,data.get("room_rack",""),data.get("status","Preparing"),data.get("notes",""))
+    if not vals[0] or min(vals[3],vals[4],vals[5],vals[6],vals[7])<0:raise ValueError("Invalid batch")
     with get_connection() as c:
         if batch_id:
-            c.execute("UPDATE batches SET batch_no=?,production_date=?,straw_qty=?,spawn_qty=?,bag_count=?,expected_yield=?,expected_harvest_date=?,status=?,notes=? WHERE id=?",vals+(batch_id,))
+            c.execute("UPDATE batches SET batch_no=?,production_date=?,straw_type=?,straw_qty=?,spawn_qty=?,bag_count=?,bag_size=?,expected_yield=?,expected_harvest_date=?,room_rack=?,status=?,notes=? WHERE id=?",vals+(batch_id,))
             c.execute("UPDATE daily_production SET batch_no=? WHERE batch_id=?",(vals[0],batch_id));c.execute("UPDATE harvests SET batch_no=? WHERE batch_id=?",(vals[0],batch_id));c.execute("UPDATE sales SET batch_no=? WHERE batch_id=?",(vals[0],batch_id))
-        else:batch_id=c.execute("INSERT INTO batches(batch_no,production_date,straw_qty,spawn_qty,bag_count,expected_yield,expected_harvest_date,status,notes) VALUES(?,?,?,?,?,?,?,?,?)",vals).lastrowid
+        else:batch_id=c.execute("INSERT INTO batches(batch_no,production_date,straw_type,straw_qty,spawn_qty,bag_count,bag_size,expected_yield,expected_harvest_date,room_rack,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",vals).lastrowid
         publish("batch_changed");return batch_id
 
 def delete_batch(batch_id):
@@ -321,9 +321,9 @@ def save_production(data,record_id=None):
     with get_connection() as c:
         batch=c.execute("SELECT batch_no FROM batches WHERE id=?",(bid,)).fetchone()
         if not batch:raise ValueError("Invalid batch")
-        vals=(data["production_date"],batch[0],bid,bags,gross,waste,gross-waste,data.get("notes",""))
-        if record_id:c.execute("UPDATE daily_production SET production_date=?,batch_no=?,batch_id=?,bags=?,production_kg=?,wastage_kg=?,saleable_kg=?,notes=? WHERE id=?",vals+(record_id,))
-        else:record_id=c.execute("INSERT INTO daily_production(production_date,batch_no,batch_id,bags,production_kg,wastage_kg,saleable_kg,notes) VALUES(?,?,?,?,?,?,?,?)",vals).lastrowid
+        vals=(data["production_date"],batch[0],bid,bags,gross,waste,gross-waste,data.get("room_rack",""),data.get("notes",""))
+        if record_id:c.execute("UPDATE daily_production SET production_date=?,batch_no=?,batch_id=?,bags=?,production_kg=?,wastage_kg=?,saleable_kg=?,room_rack=?,notes=? WHERE id=?",vals+(record_id,))
+        else:record_id=c.execute("INSERT INTO daily_production(production_date,batch_no,batch_id,bags,production_kg,wastage_kg,saleable_kg,room_rack,notes) VALUES(?,?,?,?,?,?,?,?,?)",vals).lastrowid
         publish("production_changed");return record_id
 
 def delete_production(record_id):

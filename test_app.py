@@ -267,7 +267,7 @@ class AppTests(unittest.TestCase):
         client=web_app.app.test_client()
         expected={
             "ADMIN":{item[1] for item in web_app.NAV_ITEMS},
-            "MANAGER":{"dashboard","production","harvest","stock","sales","raw_materials_web","purchases_web","expenses_web","customers_web","suppliers_web","labour_web","payments_web","ledger_web","pnl_web","reports_web","charts_web","invoices_web"},
+            "MANAGER":{"dashboard","production","harvest","stock","sales","raw_materials_web","purchases_web","expenses_web","customers_web","suppliers_web","labour_web","payments_web","ledger_web","batch_cost_web","pnl_web","reports_web","charts_web","invoices_web"},
             "STAFF":{"dashboard","production","harvest","stock","sales","customers_web","invoices_web"},
         }
         rules={rule.endpoint:rule.rule for rule in web_app.app.url_map.iter_rules() if "<" not in rule.rule}
@@ -357,6 +357,8 @@ class AppTests(unittest.TestCase):
         purchase=client.get("/manage/purchase/new").get_data(as_text=True);self.assertIn('name="supplier_id"',purchase);self.assertIn('name="material_id"',purchase);self.assertNotIn("Supplier ID",purchase);self.assertIn("calculated-total",purchase)
         sale=client.get("/manage/sale/new").get_data(as_text=True);self.assertIn('name="customer_id"',sale);self.assertIn('name="batch_id"',sale)
         payment=client.get("/manage/payment/new").get_data(as_text=True);self.assertIn('name="party"',payment);self.assertNotIn("Party ID",payment)
+        batch=client.get("/manage/batch/new").get_data(as_text=True);self.assertIn('name="straw_type"',batch);self.assertIn('name="bag_size"',batch);self.assertIn('name="room_rack"',batch)
+        production=client.get("/manage/production/new").get_data(as_text=True);self.assertIn('name="room_rack"',production);self.assertEqual(client.get("/batch-cost").status_code,200)
         with client.session_transaction() as s:s["user"]={"id":2,"name":"Staff","role":"STAFF","must_change_password":False};s["csrf_token"]="web-token"
         self.assertNotIn("+ New Customer",client.get("/customers").get_data(as_text=True));self.assertEqual(client.get("/manage/purchase/new").status_code,403);self.assertEqual(client.get("/manage/user/new").status_code,403)
 
