@@ -39,11 +39,17 @@ def update_payment(ledger_id, payment_date, payment_type, party_id, amount, mode
     if amount <= 0: raise ValueError("Amount must be positive")
     mapping={"CUSTOMER PAYMENT":("customer_payments","customer_id"),"SUPPLIER PAYMENT":("supplier_payments","supplier_id"),"LABOUR PAYMENT":("labour_payments","labour_id")}
     with get_connection() as conn:
-        old=conn.execute("SELECT source_table,source_id FROM cash_ledger WHERE id=?",(ledger_id,)).fetchone()
+        old=conn.execute("SELECT source_table,source_id,transaction_type,debit,credit FROM cash_ledger WHERE id=?",(ledger_id,)).fetchone()
         if not old: raise ValueError("Payment not found")
+        old_party=None
+        if old[0] in ("customer_payments","supplier_payments","labour_payments") and old[1] is not None:
+            party_column={"customer_payments":"customer_id","supplier_payments":"supplier_id","labour_payments":"labour_id"}[old[0]]
+            party_row=conn.execute(f"SELECT {party_column} FROM {old[0]} WHERE id=?",(old[1],)).fetchone();old_party=old_party if not party_row else old_party or party_row[0]
         if old[0] in ("customer_payments","supplier_payments","labour_payments") and old[1] is not None:conn.execute(f"DELETE FROM {old[0]} WHERE id=?",(old[1],))
         limits={"CUSTOMER PAYMENT":customer_outstanding(party_id,conn),"SUPPLIER PAYMENT":supplier_outstanding(party_id,conn),"LABOUR PAYMENT":labour_due(conn)}
-        if payment_type in limits and amount>limits[payment_type]+1e-9: raise ValueError("Payment exceeds outstanding due")
+        allowed=limits.get(payment_type)
+        if allowed is not None and old[2]==payment_type and old_party==party_id:allowed=max(allowed,float(old[4] or old[3] or 0))
+        if allowed is not None and amount>allowed+1e-9: raise ValueError("Payment exceeds outstanding due")
         source_table=source_id=None
         if payment_type in mapping:
             source_table,column=mapping[payment_type];source_id=conn.execute(f"INSERT INTO {source_table}(payment_date,{column},amount,payment_mode,reference_no,notes) VALUES(?,?,?,?,?,?)",(payment_date,party_id,amount,mode,reference,notes)).lastrowid

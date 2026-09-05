@@ -360,6 +360,34 @@ class AppTests(unittest.TestCase):
         with client.session_transaction() as s:s["user"]={"id":2,"name":"Staff","role":"STAFF","must_change_password":False};s["csrf_token"]="web-token"
         self.assertNotIn("+ New Customer",client.get("/customers").get_data(as_text=True));self.assertEqual(client.get("/manage/purchase/new").status_code,403);self.assertEqual(client.get("/manage/user/new").status_code,403)
 
+    def test_customer_credit_payment_can_be_reduced_after_sale_deleted(self):
+        from modules.accounts import record_payment,update_payment
+        self.services.set_desktop_role("ADMIN")
+        with database.get_connection() as c:customer=c.execute("INSERT INTO customers(name) VALUES('Credit Customer')").lastrowid;c.execute("INSERT INTO batches(batch_no,production_date) VALUES('CREDIT-B','2026-09-05')");bid=c.execute("SELECT id FROM batches WHERE batch_no='CREDIT-B'").fetchone()[0];c.execute("INSERT INTO harvests(harvest_date,batch_no,batch_id,quantity_kg,wastage_kg) VALUES('2026-09-05','CREDIT-B',?,10,0)",(bid,))
+        sale=self.services.save_sale({"invoice_no":"CREDIT-1","sale_date":"2026-09-05","customer_id":customer,"batch_id":bid,"quantity_kg":5,"rate_per_kg":100,"discount":0,"paid_amount":0,"payment_mode":"Credit"})
+        ledger=record_payment("2026-09-05","CUSTOMER PAYMENT",customer,500,"Bank","CREDIT-R")
+        self.services.delete_sale(sale);self.assertEqual(self.services.customer_outstanding(customer),-500)
+        import web_app
+        client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="credit-token"
+        response=client.post(f"/manage/payment/{ledger}/edit",data={"csrf_token":"credit-token","payment_date":"2026-09-05","party":f"CUSTOMER PAYMENT|{customer}","amount":"400","payment_mode":"Bank","reference":"CREDIT-R","notes":"reduced credit"})
+        self.assertEqual(response.status_code,302)
+        self.assertEqual(self.services.customer_outstanding(customer),-400)
+        with self.assertRaises(ValueError):update_payment(ledger,"2026-09-05","CUSTOMER PAYMENT",customer,450,"Bank","CREDIT-R")
+
+    def test_browser_supplier_and_labour_payment_edit_delete(self):
+        import web_app
+        self.services.set_desktop_role("ADMIN");customer,supplier,labour=self.seed();client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="pay-token"
+        def post(path,**data):data["csrf_token"]="pay-token";response=client.post(path,data=data);self.assertEqual(response.status_code,302);return response
+        cases=(("SUPPLIER PAYMENT",supplier,"SUP-WEB",100,self.services.supplier_outstanding),("LABOUR PAYMENT",labour,"LAB-WEB",100,lambda _id:self.services.labour_due()))
+        for kind,party,reference,amount,due in cases:
+            before=due(party);post("/manage/payment/new",payment_date="2026-09-05",party=f"{kind}|{party}",amount=str(amount),payment_mode="Bank",reference=reference,notes="")
+            with database.get_connection() as c:ledger=c.execute("SELECT id FROM cash_ledger WHERE reference=?",(reference,)).fetchone()[0]
+            self.assertEqual(due(party),before-amount);post(f"/manage/payment/{ledger}/edit",payment_date="2026-09-05",party=f"{kind}|{party}",amount="50",payment_mode="Bank",reference=reference,notes="edited");self.assertEqual(due(party),before-50)
+            with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE id=?",(ledger,)).fetchone()[0],1)
+            post(f"/manage/payment/{ledger}/delete");self.assertEqual(due(party),before)
+
     def test_sqlite_concurrent_writers(self):
         from concurrent.futures import ThreadPoolExecutor
         self.services.set_desktop_role("ADMIN")
