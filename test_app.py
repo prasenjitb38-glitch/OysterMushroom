@@ -288,6 +288,9 @@ class AppTests(unittest.TestCase):
         import web_app
         response=web_app.app.test_client().get("/health")
         self.assertEqual(response.status_code,200);self.assertEqual(response.json["integrity"],"ok")
+        self.assertEqual(response.json["database_file"],os.path.abspath(database.DB_FILE))
+        self.assertTrue(response.json["directory_exists"]);self.assertTrue(response.json["database_exists"])
+        self.assertEqual(response.json["persistent_database"],response.json["path_under_var_data"] and response.json["persistent_disk_mounted"])
 
     def test_sqlite_concurrent_writers(self):
         from concurrent.futures import ThreadPoolExecutor

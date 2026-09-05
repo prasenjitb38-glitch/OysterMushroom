@@ -298,11 +298,22 @@ def backup_restore_api():
 @app.route("/health")
 def health():
     import database
+    db_dir=os.path.abspath(database.DB_FOLDER)
+    db_file=os.path.abspath(database.DB_FILE)
+    normalized=db_file.replace("\\","/")
+    data_root="/var/data"
+    try:
+        disk_mounted=os.path.ismount(data_root)
+        if os.path.exists("/proc/mounts"):
+            with open("/proc/mounts",encoding="utf-8") as mounts:
+                disk_mounted=disk_mounted or any(line.split()[1]==data_root for line in mounts if len(line.split())>1)
+    except OSError:disk_mounted=False
     try:
         with get_connection() as c: integrity=c.execute("PRAGMA integrity_check").fetchone()[0]
     except Exception:
         return jsonify(status="error"),503
-    return jsonify(status="ok" if integrity=="ok" else "error",integrity=integrity,commit=os.environ.get("RENDER_GIT_COMMIT","local"),persistent_database=os.path.abspath(database.DB_FILE).replace("\\","/").startswith("/var/data/")),200 if integrity=="ok" else 503
+    persistent_path=normalized.startswith(data_root+"/")
+    return jsonify(status="ok" if integrity=="ok" else "error",integrity=integrity,commit=os.environ.get("RENDER_GIT_COMMIT","local"),app_env=os.environ.get("APP_ENV","development"),database_directory=db_dir,database_file=db_file,directory_exists=os.path.isdir(db_dir),database_exists=os.path.isfile(db_file),path_under_var_data=persistent_path,persistent_disk_mounted=disk_mounted,persistent_database=persistent_path and disk_mounted),200 if integrity=="ok" else 503
 
 
 if __name__ == "__main__": app.run(host="0.0.0.0",port=int(os.environ.get("PORT",5000)),debug=False)
