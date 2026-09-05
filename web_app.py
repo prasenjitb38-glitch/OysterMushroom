@@ -34,7 +34,17 @@ def csrf_protect():
 @app.context_processor
 def csrf_context():
     if "csrf_token" not in session:session["csrf_token"]=secrets.token_urlsafe(32)
-    return {"csrf_token":session["csrf_token"]}
+    nav=[]
+    for label,endpoint,action in NAV_ITEMS:
+        try:
+            if session.get("user"):require_permission(session["user"].get("role"),action)
+            else:continue
+        except PermissionError:continue
+        nav.append((label,endpoint))
+    return {"csrf_token":session["csrf_token"],"navigation":nav}
+
+NAV_ITEMS=(
+ ("🏠 Dashboard","dashboard","dashboard"),("🌱 Production","production","production.create"),("🍄 Harvest","harvest","harvest.create"),("📦 Stock","stock","stock.view"),("🛒 Sales","sales","sales.create"),("🧪 Raw Materials","raw_materials_web","raw_materials"),("🧺 Purchases","purchases_web","purchases"),("💰 Expenses","expenses_web","expenses"),("👥 Customers","customers_web","customers.view"),("🚚 Suppliers","suppliers_web","suppliers"),("👷 Labour","labour_web","labour"),("💳 Payments","payments_web","payments"),("🏦 Cash / Bank","ledger_web","ledger"),("📈 Profit & Loss","pnl_web","reports"),("📊 Reports","reports_web","reports"),("📉 Charts","charts_web","charts"),("🧾 Invoices","invoices_web","sales.create"),("⚙ Settings","settings_web","settings"),("🔐 Users","users_web","users"),("💾 Backup / Restore","backup_web","backup_restore"))
 
 
 def login_required(view):
@@ -148,8 +158,91 @@ def sales():
 
 
 @app.route("/stock")
-@login_required
+@permission("stock.view")
 def stock(): return render_template("stock_web.html",stock=mushroom_stock())
+
+def table_page(title,headers,sql,params=(),**extra):
+    with get_connection() as c:rows=c.execute(sql,params).fetchall()
+    return render_template("module_web.html",title=title,headers=headers,rows=rows,**extra)
+
+@app.route("/raw-materials")
+@permission("raw_materials")
+def raw_materials_web():
+    from services import raw_material_stock
+    with get_connection() as c:rows=[(r[0],r[1],r[2],r[3],raw_material_stock(r[0],c),"LOW" if raw_material_stock(r[0],c)<=r[3] else "OK") for r in c.execute("SELECT id,item,unit,reorder_level FROM raw_materials ORDER BY item")]
+    return render_template("module_web.html",title="Raw Materials",headers=("ID","Material","Unit","Minimum","Current Stock","Status"),rows=rows)
+
+@app.route("/purchases")
+@permission("purchases")
+def purchases_web():return table_page("Purchases",("Date","Invoice","Supplier","Material","Quantity","Total","Paid","Due"),"SELECT p.purchase_date,COALESCE(p.purchase_invoice,''),COALESCE(s.name,''),p.item,p.quantity,p.total_amount,p.paid_amount,p.due_amount FROM purchases p LEFT JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC")
+
+@app.route("/expenses")
+@permission("expenses")
+def expenses_web():return table_page("Expenses",("Date","Category","Description","Amount","Mode","Batch"),"SELECT expense_date,category,description,amount,payment_mode,batch_no FROM expenses ORDER BY id DESC")
+
+@app.route("/customers")
+@permission("customers.view")
+def customers_web():return table_page("Customers",("ID","Name","Mobile","Address","Opening Due"),"SELECT id,name,mobile,address,opening_due FROM customers ORDER BY name")
+
+@app.route("/suppliers")
+@permission("suppliers")
+def suppliers_web():return table_page("Suppliers",("ID","Name","Mobile","Address","Opening Due"),"SELECT id,name,mobile,address,opening_due FROM suppliers ORDER BY name")
+
+@app.route("/labour")
+@permission("labour")
+def labour_web():return table_page("Labour",("ID","Worker","Date","Work","Batch","Amount","Paid","Due"),"SELECT id,worker_name,work_date,work_type,batch_no,amount,paid,amount-paid FROM labour ORDER BY id DESC")
+
+@app.route("/payments",methods=["GET","POST"])
+@permission("payments")
+def payments_web():
+    if request.method=="POST":
+        from modules.accounts import record_payment
+        try:record_payment(request.form["date"],request.form["payment_type"],int(request.form["party_id"]),number("amount",.000001),request.form.get("mode","Cash"),request.form.get("reference",""));flash("Payment saved.","success")
+        except (ValueError,PermissionError,KeyError) as e:flash(str(e),"error")
+        return redirect(url_for("payments_web"))
+    with get_connection() as c:parties={"CUSTOMER PAYMENT":c.execute("SELECT id,name FROM customers ORDER BY name").fetchall(),"SUPPLIER PAYMENT":c.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall(),"LABOUR PAYMENT":c.execute("SELECT id,worker_name FROM labour ORDER BY worker_name").fetchall()}
+    return table_page("Payments",("Date","Type","Reference","Mode","Outflow","Inflow"),"SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger ORDER BY id DESC",payment_parties=parties)
+
+@app.route("/cash-bank")
+@permission("ledger")
+def ledger_web():return table_page("Cash / Bank Ledger",("Date","Type","Reference","Mode","Outflow","Inflow"),"SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger ORDER BY id DESC")
+
+@app.route("/profit-loss")
+@permission("reports")
+def pnl_web():
+    result=pnl(request.args.get("start"),request.args.get("end"));return render_template("module_web.html",title="Profit & Loss",headers=("Sales","COGS","Gross","Expenses","Net","Margin %","Profit/Kg"),rows=[tuple(result[k] for k in ("sales","cogs","gross","expenses","net","margin","per_kg"))],date_filter=True)
+
+@app.route("/reports")
+@permission("reports")
+def reports_web():
+    from services import cash_balance,labour_due
+    return render_template("module_web.html",title="Business Reports",headers=("Metric","Value"),rows=(("Mushroom Stock",mushroom_stock()),("Customer Due",customer_outstanding()),("Supplier Due",supplier_outstanding()),("Labour Due",labour_due()),("Cash",cash_balance("Cash")),("Bank",cash_balance("Bank"))),date_filter=True)
+
+@app.route("/charts")
+@permission("charts")
+def charts_web():return render_template("module_web.html",title="Charts",headers=(),rows=(),chart_url=url_for("chart_download"))
+
+@app.route("/invoices")
+@permission("sales.create")
+def invoices_web():return table_page("Invoices",("ID","Invoice","Date","Customer","Total","Paid","Due","PDF"),"SELECT s.id,s.invoice_no,s.sale_date,COALESCE(c.name,'Cash Customer'),s.total_amount,s.paid_amount,s.total_amount-s.paid_amount,'PDF' FROM sales s LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC",invoice_links=True)
+
+@app.route("/settings",methods=["GET","POST"])
+@permission("settings")
+def settings_web():
+    if request.method=="POST":
+        allowed=("business_name","address","mobile","email","gstin","invoice_prefix")
+        with get_connection() as c:c.executemany("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[(k,request.form.get(k,"").strip()) for k in allowed])
+        flash("Settings saved.","success");return redirect(url_for("settings_web"))
+    with get_connection() as c:values=dict(c.execute("SELECT key,value FROM settings"))
+    return render_template("module_web.html",title="Settings",headers=(),rows=(),settings_values=values)
+
+@app.route("/users")
+@permission("users")
+def users_web():return table_page("Users",("ID","Username","Name","Role","Active","Must Change Password"),"SELECT id,username,full_name,role,active,must_change_password FROM users ORDER BY username")
+
+@app.route("/backup")
+@permission("backup_restore")
+def backup_web():return render_template("module_web.html",title="Backup / Restore",headers=(),rows=(),backup_tools=True)
 
 @app.route("/api/payments/<kind>",methods=["POST"])
 @permission("payments.create")
@@ -201,6 +294,15 @@ def backup_restore_api():
         try:os.remove(path)
         except OSError:pass
     return jsonify(ok=True)
+
+@app.route("/health")
+def health():
+    import database
+    try:
+        with get_connection() as c: integrity=c.execute("PRAGMA integrity_check").fetchone()[0]
+    except Exception:
+        return jsonify(status="error"),503
+    return jsonify(status="ok" if integrity=="ok" else "error",integrity=integrity,commit=os.environ.get("RENDER_GIT_COMMIT","local"),persistent_database=os.path.abspath(database.DB_FILE).replace("\\","/").startswith("/var/data/")),200 if integrity=="ok" else 503
 
 
 if __name__ == "__main__": app.run(host="0.0.0.0",port=int(os.environ.get("PORT",5000)),debug=False)

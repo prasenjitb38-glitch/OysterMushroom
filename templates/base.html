@@ -1,2 +1,9 @@
-<!doctype html><html lang="bn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>{{ title or 'Oyster Mushroom Manager' }}</title><link rel="stylesheet" href="{{ url_for('static',filename='mobile.css') }}"></head>
-<body><header><b>🍄 OYSTER MUSHROOM</b><button onclick="document.body.classList.toggle('open')">☰</button></header><nav><a href="/">🏠 Dashboard</a><a href="/production">🌱 Production</a><a href="/harvest">🍄 Harvest</a><a href="/stock">📦 Stock</a><a href="/sales">🛒 Sales</a><a href="/logout">↪ Logout</a></nav><main>{% for category,message in get_flashed_messages(with_categories=true) %}<div class="flash {{category}}">{{message}}</div>{% endfor %}{% block body %}{% endblock %}</main></body></html>
+<!doctype html>
+<html lang="bn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>{{ title or 'Oyster Mushroom Manager' }}</title><link rel="stylesheet" href="{{ url_for('static',filename='mobile.css') }}"></head>
+<body>
+<header><b>🍄 OYSTER MUSHROOM</b><button id="nav-toggle" type="button" aria-label="Toggle navigation" aria-controls="sidebar" aria-expanded="false">☰</button></header>
+<nav id="sidebar" aria-label="Main navigation">{% for label, endpoint in navigation %}<a href="{{ url_for(endpoint) }}">{{ label }}</a>{% endfor %}<a href="{{ url_for('logout') }}">↪ Logout</a></nav>
+<button id="nav-overlay" type="button" aria-label="Close navigation"></button>
+<main id="content">{% for category,message in get_flashed_messages(with_categories=true) %}<div class="flash {{category}}">{{message}}</div>{% endfor %}{% block body %}{% endblock %}</main>
+<script src="{{ url_for('static',filename='navigation.js') }}"></script>
+</body></html>

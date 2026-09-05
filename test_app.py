@@ -262,6 +262,33 @@ class AppTests(unittest.TestCase):
         role("ADMIN",True);response=client.get("/");self.assertEqual(response.status_code,302);self.assertIn("change-password",response.location)
         role("ADMIN");self.assertEqual(client.get("/api/reports").status_code,200);self.assertEqual(client.get("/charts.png").status_code,200);self.assertEqual(client.get("/backup/download").status_code,200)
 
+    def test_complete_role_aware_web_navigation(self):
+        import web_app
+        client=web_app.app.test_client()
+        expected={
+            "ADMIN":{item[1] for item in web_app.NAV_ITEMS},
+            "MANAGER":{"dashboard","production","harvest","stock","sales","raw_materials_web","purchases_web","expenses_web","customers_web","suppliers_web","labour_web","payments_web","ledger_web","pnl_web","reports_web","charts_web","invoices_web"},
+            "STAFF":{"dashboard","production","harvest","stock","sales","customers_web","invoices_web"},
+        }
+        rules={rule.endpoint:rule.rule for rule in web_app.app.url_map.iter_rules() if "<" not in rule.rule}
+        for role,endpoints in expected.items():
+            with client.session_transaction() as s:s["user"]={"id":1,"name":role,"role":role,"must_change_password":False};s["csrf_token"]="secure-token"
+            page=client.get("/")
+            self.assertEqual(page.status_code,200)
+            html=page.get_data(as_text=True)
+            for label,endpoint,action in web_app.NAV_ITEMS:
+                displayed=f'href="{rules[endpoint]}"' in html
+                self.assertEqual(displayed,endpoint in endpoints,(role,endpoint))
+                if endpoint in endpoints:self.assertEqual(client.get(rules[endpoint]).status_code,200,(role,endpoint))
+            self.assertIn('id="nav-toggle"',html);self.assertIn('aria-controls="sidebar"',html);self.assertIn("navigation.js",html)
+        css=client.get("/static/mobile.css").get_data(as_text=True);js=client.get("/static/navigation.js").get_data(as_text=True)
+        self.assertIn("nav-collapsed",css);self.assertIn("nav-open",css);self.assertIn("addEventListener('click'",js)
+
+    def test_web_health_endpoint(self):
+        import web_app
+        response=web_app.app.test_client().get("/health")
+        self.assertEqual(response.status_code,200);self.assertEqual(response.json["integrity"],"ok")
+
     def test_sqlite_concurrent_writers(self):
         from concurrent.futures import ThreadPoolExecutor
         self.services.set_desktop_role("ADMIN")

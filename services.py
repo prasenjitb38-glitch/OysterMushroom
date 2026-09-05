@@ -144,8 +144,8 @@ def pnl(start=None, end=None):
 
 PERMISSIONS={
  "ADMIN":{"*"},
- "MANAGER":{"production","harvest","stock","sales","customers","suppliers","labour","purchases","expenses","payments","ledger","batch_cost","reports","charts"},
- "STAFF":{"production.create","harvest.create","sales.create","customers.view","stock.view"},
+ "MANAGER":{"dashboard","production","harvest","stock","sales","customers","suppliers","labour","raw_materials","purchases","expenses","payments","ledger","batch_cost","reports","charts"},
+ "STAFF":{"dashboard","production.create","harvest.create","sales.create","customers.view","stock.view"},
 }
 _desktop_role="ADMIN"
 def set_desktop_role(role):
