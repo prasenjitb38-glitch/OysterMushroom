@@ -5,8 +5,15 @@ import secrets
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FOLDER = os.environ.get("MUSHROOM_DATA_DIR", os.path.join(BASE_DIR, "database"))
-DB_FILE = os.path.join(DB_FOLDER, "mushroom.db")
+
+def resolve_database_paths(environment=None, base_dir=BASE_DIR):
+    environment=environment if environment is not None else os.environ
+    configured=(environment.get("MUSHROOM_DATA_DIR") or "").strip()
+    production=(environment.get("APP_ENV") or environment.get("FLASK_ENV") or "development").lower()=="production"
+    folder=os.path.abspath(configured or ("/var/data" if production else os.path.join(base_dir,"database")))
+    return folder,os.path.join(folder,"mushroom.db")
+
+DB_FOLDER,DB_FILE=resolve_database_paths()
 
 
 class DatabaseConnection(sqlite3.Connection):

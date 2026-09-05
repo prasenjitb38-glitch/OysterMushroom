@@ -292,6 +292,14 @@ class AppTests(unittest.TestCase):
         self.assertTrue(response.json["directory_exists"]);self.assertTrue(response.json["database_exists"])
         self.assertEqual(response.json["persistent_database"],response.json["path_under_var_data"] and response.json["persistent_disk_mounted"])
 
+    def test_database_path_resolution_by_environment(self):
+        production_dir,production_file=database.resolve_database_paths({"APP_ENV":"production"})
+        self.assertEqual(production_dir,os.path.abspath("/var/data"));self.assertEqual(production_file,os.path.join(production_dir,"mushroom.db"))
+        configured_dir,configured_file=database.resolve_database_paths({"APP_ENV":"production","MUSHROOM_DATA_DIR":"/var/data"})
+        self.assertEqual(configured_file,os.path.join(configured_dir,"mushroom.db"));self.assertTrue(configured_file.replace("\\","/").endswith("/var/data/mushroom.db"))
+        local_dir,local_file=database.resolve_database_paths({},base_dir=os.path.join(self.temp.name,"project"))
+        self.assertEqual(local_file,os.path.join(local_dir,"mushroom.db"));self.assertTrue(local_dir.endswith("database"));self.assertNotIn("/var/data",local_file.replace("\\","/"))
+
     def test_sqlite_concurrent_writers(self):
         from concurrent.futures import ThreadPoolExecutor
         self.services.set_desktop_role("ADMIN")
