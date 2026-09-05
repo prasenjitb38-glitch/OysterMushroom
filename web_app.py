@@ -20,6 +20,8 @@ configured_secret=os.environ.get("SECRET_KEY")
 if production_mode and (not configured_secret or len(configured_secret)<32):raise RuntimeError("A strong SECRET_KEY (32+ characters) is required in production")
 app.secret_key=configured_secret or secrets.token_hex(32)
 app.config.update(SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE="Lax",SESSION_COOKIE_SECURE=production_mode)
+from web_crud import crud
+app.register_blueprint(crud)
 _attempts={}
 
 @app.before_request
@@ -125,8 +127,8 @@ def production():
                 if waste>gross or not found:raise ValueError("Production/Wastage/Batch is invalid")
                 c.execute("INSERT INTO daily_production(production_date,batch_no,batch_id,bags,production_kg,wastage_kg,saleable_kg) VALUES(?,?,?,?,?,?,?)",(request.form.get("date",""),batch,found[0],bags,gross,waste,gross-waste));flash("Production saved.","success")
             except (ValueError,TypeError):flash("Invalid production form values.","error")
-        rows=c.execute("SELECT production_date,batch_no,bags,production_kg,wastage_kg,saleable_kg FROM daily_production ORDER BY id DESC").fetchall();batches=c.execute("SELECT batch_no FROM batches ORDER BY id DESC").fetchall()
-    return render_template("entry.html",title="Daily Production",kind="production",rows=rows,batches=batches)
+        rows=c.execute("SELECT id,production_date,batch_no,bags,production_kg,wastage_kg,saleable_kg FROM daily_production ORDER BY id DESC").fetchall();batches=c.execute("SELECT batch_no FROM batches ORDER BY id DESC").fetchall();batch_rows=c.execute("SELECT id,batch_no,production_date,bag_count,expected_yield,status FROM batches ORDER BY id DESC").fetchall()
+    return render_template("entry.html",title="Production & Batches",kind="production",rows=rows,batches=batches,batch_rows=batch_rows)
 
 
 @app.route("/harvest", methods=["GET", "POST"])
@@ -139,7 +141,7 @@ def harvest():
                 if w>q or not found:raise ValueError
                 c.execute("INSERT INTO harvests(harvest_date,batch_no,batch_id,flush_no,quantity_kg,wastage_kg,grade,notes) VALUES(?,?,?,?,?,?,?,?)",(request.form.get("date",""),batch,found[0],flush,q,w,request.form.get("grade",""),request.form.get("notes","")));flash("Harvest saved.","success")
             except (ValueError,TypeError):flash("Invalid harvest form values.","error")
-        rows=c.execute("SELECT harvest_date,batch_no,flush_no,quantity_kg,wastage_kg,quantity_kg-wastage_kg FROM harvests ORDER BY id DESC").fetchall();batches=c.execute("SELECT batch_no FROM batches ORDER BY id DESC").fetchall()
+        rows=c.execute("SELECT id,harvest_date,batch_no,flush_no,quantity_kg,wastage_kg,quantity_kg-wastage_kg FROM harvests ORDER BY id DESC").fetchall();batches=c.execute("SELECT batch_no FROM batches ORDER BY id DESC").fetchall()
     return render_template("entry.html",title="Harvest",kind="harvest",rows=rows,batches=batches)
 
 
@@ -152,14 +154,16 @@ def sales():
                 qty=number("quantity",.000001);rate=number("rate",.000001);discount=number("discount");paid=number("paid");batch_id=int(request.form["batch_id"]) if request.form.get("batch_id") else None
                 save_sale({"invoice_no":generate_invoice_no(),"sale_date":request.form["date"],"batch_id":batch_id,"quantity_kg":qty,"rate_per_kg":rate,"discount":discount,"paid_amount":paid,"payment_mode":request.form.get("mode","Cash"),"notes":request.form.get("notes","")},conn=c);flash("Sale saved.","success")
             except (ValueError,OverflowError,TypeError) as e:flash(str(e),"error")
-        rows=c.execute("SELECT invoice_no,sale_date,quantity_kg,rate_per_kg,total_amount,paid_amount,total_amount-paid_amount FROM sales ORDER BY id DESC").fetchall()
+        rows=c.execute("SELECT id,invoice_no,sale_date,quantity_kg,rate_per_kg,total_amount,paid_amount,total_amount-paid_amount FROM sales ORDER BY id DESC").fetchall()
         batches=c.execute("SELECT id,batch_no FROM batches ORDER BY batch_no").fetchall()
     return render_template("entry.html",title="Sales",kind="sales",rows=rows,stock=mushroom_stock(),batches=batches)
 
 
 @app.route("/stock")
 @permission("stock.view")
-def stock(): return render_template("stock_web.html",stock=mushroom_stock())
+def stock():
+    with get_connection() as c:rows=c.execute("SELECT id,transaction_date,transaction_type,batch_no,quantity_kg,notes FROM stock_transactions ORDER BY id DESC").fetchall()
+    return render_template("stock_web.html",stock=mushroom_stock(),rows=rows)
 
 def table_page(title,headers,sql,params=(),**extra):
     with get_connection() as c:rows=c.execute(sql,params).fetchall()
@@ -170,27 +174,32 @@ def table_page(title,headers,sql,params=(),**extra):
 def raw_materials_web():
     from services import raw_material_stock
     with get_connection() as c:rows=[(r[0],r[1],r[2],r[3],raw_material_stock(r[0],c),"LOW" if raw_material_stock(r[0],c)<=r[3] else "OK") for r in c.execute("SELECT id,item,unit,reorder_level FROM raw_materials ORDER BY item")]
-    return render_template("module_web.html",title="Raw Materials",headers=("ID","Material","Unit","Minimum","Current Stock","Status"),rows=rows)
+    with get_connection() as c:usage=c.execute("SELECT u.id,u.usage_date,m.item,COALESCE(b.batch_no,''),u.quantity FROM material_usage u JOIN raw_materials m ON m.id=u.material_id LEFT JOIN batches b ON b.id=u.batch_id ORDER BY u.id DESC").fetchall();adjustments=c.execute("SELECT a.id,a.adjustment_date,m.item,a.adjustment_type,a.quantity FROM material_adjustments a JOIN raw_materials m ON m.id=a.material_id ORDER BY a.id DESC").fetchall()
+    return render_template("module_web.html",title="Raw Materials",headers=("ID","Material","Unit","Minimum","Current Stock","Status"),rows=rows,create_resource="material",action_resource="material",secondary=(("Material Usage",("ID","Date","Material","Batch","Quantity"),usage,"usage"),("Material Adjustments",("ID","Date","Material","Type","Quantity"),adjustments,"adjustment")),extra_creates=(("+ Material Usage","usage"),("+ Stock Adjustment","adjustment")))
 
 @app.route("/purchases")
 @permission("purchases")
-def purchases_web():return table_page("Purchases",("Date","Invoice","Supplier","Material","Quantity","Total","Paid","Due"),"SELECT p.purchase_date,COALESCE(p.purchase_invoice,''),COALESCE(s.name,''),p.item,p.quantity,p.total_amount,p.paid_amount,p.due_amount FROM purchases p LEFT JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC")
+def purchases_web():return table_page("Purchases",("ID","Date","Invoice","Supplier","Material","Quantity","Total","Paid","Due"),"SELECT p.id,p.purchase_date,COALESCE(p.purchase_invoice,''),COALESCE(s.name,''),p.item,p.quantity,p.total_amount,p.paid_amount,p.due_amount FROM purchases p LEFT JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC",create_resource="purchase",action_resource="purchase")
 
 @app.route("/expenses")
 @permission("expenses")
-def expenses_web():return table_page("Expenses",("Date","Category","Description","Amount","Mode","Batch"),"SELECT expense_date,category,description,amount,payment_mode,batch_no FROM expenses ORDER BY id DESC")
+def expenses_web():return table_page("Expenses",("ID","Date","Category","Description","Amount","Mode","Batch"),"SELECT id,expense_date,category,description,amount,payment_mode,batch_no FROM expenses ORDER BY id DESC",create_resource="expense",action_resource="expense")
 
 @app.route("/customers")
 @permission("customers.view")
-def customers_web():return table_page("Customers",("ID","Name","Mobile","Address","Opening Due"),"SELECT id,name,mobile,address,opening_due FROM customers ORDER BY name")
+def customers_web():
+    q="%"+request.args.get("q","").strip()+"%"
+    return table_page("Customers",("ID","Name","Mobile","Address","Opening Due"),"SELECT id,name,mobile,address,opening_due FROM customers WHERE name LIKE ? OR mobile LIKE ? ORDER BY name",(q,q),create_resource="customer",action_resource="customer",statement_resource="customer",search=True)
 
 @app.route("/suppliers")
 @permission("suppliers")
-def suppliers_web():return table_page("Suppliers",("ID","Name","Mobile","Address","Opening Due"),"SELECT id,name,mobile,address,opening_due FROM suppliers ORDER BY name")
+def suppliers_web():
+    q="%"+request.args.get("q","").strip()+"%"
+    return table_page("Suppliers",("ID","Name","Mobile","Address","Opening Due"),"SELECT id,name,mobile,address,opening_due FROM suppliers WHERE name LIKE ? OR mobile LIKE ? ORDER BY name",(q,q),create_resource="supplier",action_resource="supplier",statement_resource="supplier",search=True)
 
 @app.route("/labour")
 @permission("labour")
-def labour_web():return table_page("Labour",("ID","Worker","Date","Work","Batch","Amount","Paid","Due"),"SELECT id,worker_name,work_date,work_type,batch_no,amount,paid,amount-paid FROM labour ORDER BY id DESC")
+def labour_web():return table_page("Labour",("ID","Worker","Date","Work","Batch","Amount","Paid","Due"),"SELECT id,worker_name,work_date,work_type,batch_no,amount,paid,amount-paid FROM labour ORDER BY id DESC",create_resource="labour",action_resource="labour")
 
 @app.route("/payments",methods=["GET","POST"])
 @permission("payments")
@@ -201,7 +210,7 @@ def payments_web():
         except (ValueError,PermissionError,KeyError) as e:flash(str(e),"error")
         return redirect(url_for("payments_web"))
     with get_connection() as c:parties={"CUSTOMER PAYMENT":c.execute("SELECT id,name FROM customers ORDER BY name").fetchall(),"SUPPLIER PAYMENT":c.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall(),"LABOUR PAYMENT":c.execute("SELECT id,worker_name FROM labour ORDER BY worker_name").fetchall()}
-    return table_page("Payments",("Date","Type","Reference","Mode","Outflow","Inflow"),"SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger ORDER BY id DESC",payment_parties=parties)
+    return table_page("Payments",("ID","Date","Type","Reference","Mode","Outflow","Inflow"),"SELECT id,transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger WHERE source_table IN ('customer_payments','supplier_payments','labour_payments') ORDER BY id DESC",payment_parties=parties,action_resource="payment")
 
 @app.route("/cash-bank")
 @permission("ledger")
@@ -230,7 +239,11 @@ def invoices_web():return table_page("Invoices",("ID","Invoice","Date","Customer
 @permission("settings")
 def settings_web():
     if request.method=="POST":
-        allowed=("business_name","address","mobile","email","gstin","invoice_prefix")
+        allowed=("business_name","address","mobile","email","gstin","invoice_prefix","opening_cash","opening_bank","opening_mushroom_stock","default_payment_mode","units","expected_rate")
+        try:
+            if any(float(request.form.get(k,0) or 0)<0 for k in ("opening_cash","opening_bank","opening_mushroom_stock","expected_rate")):raise ValueError
+        except ValueError:
+            flash("Opening balances and expected rate must be non-negative numbers.","error");return redirect(url_for("settings_web"))
         with get_connection() as c:c.executemany("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[(k,request.form.get(k,"").strip()) for k in allowed])
         flash("Settings saved.","success");return redirect(url_for("settings_web"))
     with get_connection() as c:values=dict(c.execute("SELECT key,value FROM settings"))
@@ -238,7 +251,7 @@ def settings_web():
 
 @app.route("/users")
 @permission("users")
-def users_web():return table_page("Users",("ID","Username","Name","Role","Active","Must Change Password"),"SELECT id,username,full_name,role,active,must_change_password FROM users ORDER BY username")
+def users_web():return table_page("Users",("ID","Username","Name","Role","Active","Must Change Password"),"SELECT id,username,full_name,role,active,must_change_password FROM users ORDER BY username",create_resource="user",user_actions=True)
 
 @app.route("/backup")
 @permission("backup_restore")

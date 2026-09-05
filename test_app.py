@@ -300,6 +300,66 @@ class AppTests(unittest.TestCase):
         local_dir,local_file=database.resolve_database_paths({},base_dir=os.path.join(self.temp.name,"project"))
         self.assertEqual(local_file,os.path.join(local_dir,"mushroom.db"));self.assertTrue(local_dir.endswith("database"));self.assertNotIn("/var/data",local_file.replace("\\","/"))
 
+    def test_browser_post_crud_workflow_and_reversals(self):
+        import web_app
+        self.services.set_desktop_role("ADMIN")
+        client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="web-token"
+        def post(path,**data):
+            data["csrf_token"]="web-token";response=client.post(path,data=data)
+            self.assertEqual(response.status_code,302,(path,response.get_data(as_text=True)));return response
+        post("/manage/supplier/new",name="Web Supplier",mobile="111",email="s@test",address="A",opening_due="25",notes="")
+        post("/manage/customer/new",name="Web Customer",mobile="222",email="c@test",address="B",opening_due="50",notes="")
+        with database.get_connection() as c:
+            supplier=c.execute("SELECT id FROM suppliers WHERE name='Web Supplier'").fetchone()[0];customer=c.execute("SELECT id FROM customers WHERE name='Web Customer'").fetchone()[0];material=c.execute("SELECT id FROM raw_materials WHERE item='Spawn'").fetchone()[0]
+        purchase={"purchase_date":"2026-09-05","purchase_invoice":"WEB-P1","supplier_id":str(supplier),"material_id":str(material),"batch_no":"","quantity":"5","unit":"Kg","rate":"10","paid_amount":"20","payment_mode":"Cash","notes":"web"}
+        post("/manage/purchase/new",**purchase);self.assertEqual(self.services.raw_material_stock(material),5)
+        with database.get_connection() as c:pid=c.execute("SELECT id FROM purchases WHERE purchase_invoice='WEB-P1'").fetchone()[0];self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_table='purchases' AND source_id=?",(pid,)).fetchone()[0],1)
+        purchase["quantity"]="7";post(f"/manage/purchase/{pid}/edit",**purchase);self.assertEqual(self.services.raw_material_stock(material),7)
+        post(f"/manage/purchase/{pid}/delete");self.assertEqual(self.services.raw_material_stock(material),0)
+        batch={"batch_no":"WEB-B1","production_date":"2026-09-05","straw_qty":"10","spawn_qty":"1","bag_count":"20","expected_yield":"8","expected_harvest_date":"","status":"Growing","notes":""}
+        post("/manage/batch/new",**batch)
+        with database.get_connection() as c:bid=c.execute("SELECT id FROM batches WHERE batch_no='WEB-B1'").fetchone()[0]
+        post("/manage/adjustment/new",adjustment_date="2026-09-05",material_id=str(material),batch_id="",adjustment_type="IN",quantity="3",notes="")
+        post("/manage/usage/new",usage_date="2026-09-05",material_id=str(material),batch_id=str(bid),quantity="1",notes="")
+        before=self.services.mushroom_stock();post("/manage/production/new",production_date="2026-09-05",batch_id=str(bid),bags="20",production_kg="8",wastage_kg=".5",notes="");self.assertEqual(self.services.mushroom_stock(),before)
+        post("/manage/harvest/new",harvest_date="2026-09-05",batch_id=str(bid),flush_no="1",quantity_kg="10",wastage_kg="1",grade="A",notes="");self.assertEqual(self.services.mushroom_stock(),before+9)
+        post("/manage/sale/new",sale_date="2026-09-05",customer_id=str(customer),batch_id=str(bid),quantity_kg="3",rate_per_kg="100",discount="0",paid_amount="100",payment_mode="Cash",notes="")
+        self.assertEqual(self.services.mushroom_stock(),before+6)
+        with database.get_connection() as c:sale_id=c.execute("SELECT id FROM sales WHERE customer_id=?",(customer,)).fetchone()[0]
+        due_before=self.services.customer_outstanding(customer);cash_before=self.services.cash_balance("Cash")
+        post("/manage/payment/new",payment_date="2026-09-05",party=f"CUSTOMER PAYMENT|{customer}",amount="20",payment_mode="Cash",reference="WEB-R1",notes="")
+        self.assertEqual(self.services.customer_outstanding(customer),due_before-20);self.assertEqual(self.services.cash_balance("Cash"),cash_before+20)
+        with database.get_connection() as c:payment_id=c.execute("SELECT id FROM cash_ledger WHERE reference='WEB-R1'").fetchone()[0]
+        post(f"/manage/payment/{payment_id}/edit",payment_date="2026-09-05",party=f"CUSTOMER PAYMENT|{customer}",amount="10",payment_mode="Cash",reference="WEB-R1",notes="edited")
+        self.assertEqual(self.services.customer_outstanding(customer),due_before-10);self.assertEqual(self.services.cash_balance("Cash"),cash_before+10)
+        post("/manage/expense/new",expense_date="2026-09-05",category="Web",description="Test",amount="30",payment_mode="Cash",batch_no="",notes="")
+        with database.get_connection() as c:eid=c.execute("SELECT id FROM expenses WHERE category='Web'").fetchone()[0]
+        self.assertEqual(self.services.cash_balance("Cash"),cash_before-20)
+        post(f"/manage/expense/{eid}/edit",expense_date="2026-09-05",category="Web",description="Edited",amount="10",payment_mode="Cash",batch_no="",notes="");self.assertEqual(self.services.cash_balance("Cash"),cash_before)
+        post(f"/manage/expense/{eid}/delete");self.assertEqual(self.services.cash_balance("Cash"),cash_before+10)
+        post(f"/manage/payment/{payment_id}/delete");self.assertEqual(self.services.customer_outstanding(customer),due_before);self.assertEqual(self.services.cash_balance("Cash"),cash_before)
+        post(f"/manage/sale/{sale_id}/delete");self.assertEqual(self.services.mushroom_stock(),before+9)
+        post("/manage/user/new",username="webstaff",full_name="Web Staff",password="Temporary88",role="STAFF")
+        with database.get_connection() as c:user_id=c.execute("SELECT id FROM users WHERE username='webstaff'").fetchone()[0]
+        post(f"/manage/user/{user_id}/reset",password="ChangedTemp99")
+        self.assertTrue(database.authenticate("webstaff","ChangedTemp99")[5])
+        post(f"/manage/user/{user_id}/toggle");self.assertIsNone(database.authenticate("webstaff","ChangedTemp99"))
+        with client.session_transaction() as s:s["user"]={"id":2,"name":"Staff","role":"STAFF","must_change_password":False};s["csrf_token"]="web-token"
+        self.assertEqual(client.get(f"/manage/supplier/{supplier}/edit").status_code,403);self.assertEqual(client.post(f"/manage/supplier/{supplier}/delete",data={"csrf_token":"web-token"}).status_code,403)
+
+    def test_web_crud_controls_and_dropdowns(self):
+        import web_app
+        client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="web-token"
+        expected=(("/suppliers","+ New Supplier"),("/customers","+ New Customer"),("/purchases","+ New Purchase"),("/expenses","+ New Expense"),("/labour","+ New Labour"),("/production","+ New Batch"),("/production","+ Daily Production"),("/harvest","+ New Harvest"),("/sales","+ New Sale"),("/stock","+ New Stock Adjustment"),("/raw-materials","+ New Material"),("/payments","+ New Payment"),("/users","+ New User"))
+        for path,label in expected:self.assertIn(label,client.get(path).get_data(as_text=True),(path,label))
+        purchase=client.get("/manage/purchase/new").get_data(as_text=True);self.assertIn('name="supplier_id"',purchase);self.assertIn('name="material_id"',purchase);self.assertNotIn("Supplier ID",purchase);self.assertIn("calculated-total",purchase)
+        sale=client.get("/manage/sale/new").get_data(as_text=True);self.assertIn('name="customer_id"',sale);self.assertIn('name="batch_id"',sale)
+        payment=client.get("/manage/payment/new").get_data(as_text=True);self.assertIn('name="party"',payment);self.assertNotIn("Party ID",payment)
+        with client.session_transaction() as s:s["user"]={"id":2,"name":"Staff","role":"STAFF","must_change_password":False};s["csrf_token"]="web-token"
+        self.assertNotIn("+ New Customer",client.get("/customers").get_data(as_text=True));self.assertEqual(client.get("/manage/purchase/new").status_code,403);self.assertEqual(client.get("/manage/user/new").status_code,403)
+
     def test_sqlite_concurrent_writers(self):
         from concurrent.futures import ThreadPoolExecutor
         self.services.set_desktop_role("ADMIN")

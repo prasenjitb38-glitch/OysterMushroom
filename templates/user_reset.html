@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block body %}<h1>Reset User Password</h1><form method="post" class="form"><input type="hidden" name="csrf_token" value="{{csrf_token}}"><label>Temporary password<input type="password" name="password" minlength="8" required></label><button>Reset Password</button></form>{% endblock %}

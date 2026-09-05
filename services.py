@@ -331,6 +331,88 @@ def delete_production(record_id):
     with get_connection() as c:result=c.execute("DELETE FROM daily_production WHERE id=?",(record_id,)).rowcount>0
     publish("production_changed");return result
 
+def save_harvest(data,record_id=None):
+    enforce_desktop("harvest.edit" if record_id else "harvest.create")
+    qty=float(data["quantity_kg"]);waste=float(data.get("wastage_kg",0));flush=int(data.get("flush_no",1));bid=int(data["batch_id"])
+    if qty<0 or waste<0 or waste>qty or flush<1:raise ValueError("Invalid harvest")
+    with get_connection() as c:
+        batch=c.execute("SELECT batch_no FROM batches WHERE id=?",(bid,)).fetchone()
+        if not batch:raise ValueError("Invalid batch")
+        vals=(data["harvest_date"],batch[0],bid,flush,qty,waste,data.get("grade",""),data.get("notes",""))
+        if record_id:c.execute("UPDATE harvests SET harvest_date=?,batch_no=?,batch_id=?,flush_no=?,quantity_kg=?,wastage_kg=?,grade=?,notes=? WHERE id=?",vals+(record_id,))
+        else:record_id=c.execute("INSERT INTO harvests(harvest_date,batch_no,batch_id,flush_no,quantity_kg,wastage_kg,grade,notes) VALUES(?,?,?,?,?,?,?,?)",vals).lastrowid
+    publish("harvest_changed");return record_id
+
+def delete_harvest(record_id):
+    enforce_desktop("harvest.delete")
+    with get_connection() as c:
+        old=c.execute("SELECT quantity_kg-wastage_kg FROM harvests WHERE id=?",(record_id,)).fetchone()
+        if not old:return False
+        if mushroom_stock(c)-old[0]<-1e-9:raise OverflowError("Deleting harvest would make mushroom stock negative")
+        c.execute("DELETE FROM harvests WHERE id=?",(record_id,))
+    publish("harvest_changed");return True
+
+def save_party(kind,data,record_id=None):
+    table="customers" if kind=="customer" else "suppliers"
+    enforce_desktop(f"{table}.edit" if record_id else f"{table}.create")
+    name=data.get("name","").strip()
+    if not name or float(data.get("opening_due",0))<0:raise ValueError("Invalid party")
+    vals=(name,data.get("mobile",""),data.get("email",""),data.get("address",""),float(data.get("opening_due",0)),data.get("notes",""))
+    with get_connection() as c:
+        if record_id:c.execute(f"UPDATE {table} SET name=?,mobile=?,email=?,address=?,opening_due=?,notes=? WHERE id=?",vals+(record_id,))
+        else:record_id=c.execute(f"INSERT INTO {table}(name,mobile,email,address,opening_due,notes) VALUES(?,?,?,?,?,?)",vals).lastrowid
+    publish(table+"_changed");return record_id
+
+def delete_party(kind,record_id):
+    table="customers" if kind=="customer" else "suppliers";enforce_desktop(f"{table}.delete")
+    dependencies=("sales","customer_payments") if kind=="customer" else ("purchases","supplier_payments")
+    key="customer_id" if kind=="customer" else "supplier_id"
+    with get_connection() as c:
+        if any(c.execute(f"SELECT 1 FROM {t} WHERE {key}=? LIMIT 1",(record_id,)).fetchone() for t in dependencies):raise ValueError("Record has transaction history and cannot be deleted")
+        return c.execute(f"DELETE FROM {table} WHERE id=?",(record_id,)).rowcount>0
+
+def save_material(data,record_id=None):
+    enforce_desktop("raw_materials.edit" if record_id else "raw_materials.create")
+    item=data.get("item","").strip();opening=float(data.get("opening_stock",0));level=float(data.get("reorder_level",0))
+    if not item or min(opening,level)<0:raise ValueError("Invalid material")
+    vals=(item,data.get("unit","Kg"),opening,level)
+    with get_connection() as c:
+        if record_id:c.execute("UPDATE raw_materials SET item=?,unit=?,opening_stock=?,reorder_level=? WHERE id=?",vals+(record_id,))
+        else:record_id=c.execute("INSERT INTO raw_materials(item,unit,opening_stock,reorder_level) VALUES(?,?,?,?)",vals).lastrowid
+    publish("material_changed");return record_id
+
+def delete_material(record_id):
+    enforce_desktop("raw_materials.delete")
+    with get_connection() as c:
+        if any(c.execute(f"SELECT 1 FROM {t} WHERE material_id=? LIMIT 1",(record_id,)).fetchone() for t in ("purchases","material_usage","material_adjustments")):raise ValueError("Material has transaction history and cannot be deleted")
+        return c.execute("DELETE FROM raw_materials WHERE id=?",(record_id,)).rowcount>0
+
+def save_stock_adjustment(data,record_id=None):
+    enforce_desktop("stock.edit" if record_id else "stock.create")
+    qty=float(data["quantity_kg"]);kind=data.get("transaction_type","ADJUSTMENT IN").upper()
+    if qty<=0 or kind not in ("ADJUSTMENT IN","ADJUSTMENT OUT","OPENING STOCK"):raise ValueError("Invalid stock adjustment")
+    signed=qty if kind in ("ADJUSTMENT IN","OPENING STOCK") else -qty
+    with get_connection() as c:
+        available=mushroom_stock(c)
+        if record_id:
+            old=c.execute("SELECT quantity_kg FROM stock_transactions WHERE id=?",(record_id,)).fetchone()
+            if not old:raise ValueError("Adjustment not found")
+            available-=old[0]
+        if available+signed< -1e-9:raise OverflowError("Adjustment would make stock negative")
+        vals=(data["transaction_date"],kind,data.get("batch_no",""),signed,data.get("notes",""))
+        if record_id:c.execute("UPDATE stock_transactions SET transaction_date=?,transaction_type=?,batch_no=?,quantity_kg=?,notes=? WHERE id=?",vals+(record_id,))
+        else:record_id=c.execute("INSERT INTO stock_transactions(transaction_date,transaction_type,batch_no,quantity_kg,notes) VALUES(?,?,?,?,?)",vals).lastrowid
+    publish("stock_changed");return record_id
+
+def delete_stock_adjustment(record_id):
+    enforce_desktop("stock.delete")
+    with get_connection() as c:
+        old=c.execute("SELECT quantity_kg FROM stock_transactions WHERE id=?",(record_id,)).fetchone()
+        if not old:return False
+        if mushroom_stock(c)-old[0]<-1e-9:raise OverflowError("Deleting adjustment would make stock negative")
+        c.execute("DELETE FROM stock_transactions WHERE id=?",(record_id,))
+    publish("stock_changed");return True
+
 def batch_summary(batch_id,conn=None):
     own=conn is None;conn=conn or get_connection()
     try:
