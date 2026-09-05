@@ -1,10 +1,31 @@
-import sqlite3
+import sqlite3,os,tempfile
 import tkinter as tk
 from datetime import date
 from tkinter import messagebox, ttk
 
 from database import get_connection
-from services import mushroom_stock
+from services import mushroom_stock, save_sale as save_sale_record, delete_sale as delete_sale_record,invoice_data
+
+def generate_invoice_pdf_file(sale_id,path):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
+    data=invoice_data(sale_id);pdf=canvas.Canvas(path,pagesize=A4);width,height=A4;y=height-55
+    logo=data.get("logo")
+    if logo and os.path.isfile(logo):
+        try:pdf.drawImage(ImageReader(logo),55,y-35,width=55,height=55,preserveAspectRatio=True,mask='auto')
+        except Exception:pass
+    pdf.setFont("Helvetica-Bold",18);pdf.drawCentredString(width/2,y,data["business_name"]);y-=22;pdf.setFont("Helvetica",9)
+    for line in (data["address"],f"Mobile: {data['mobile']}",f"GSTIN: {data['gstin']}" if data['gstin'] else ""):
+        if line:pdf.drawCentredString(width/2,y,line);y-=14
+    y-=12;pdf.setFont("Helvetica-Bold",14);pdf.drawString(55,y,"SALES INVOICE");y-=25;pdf.setFont("Helvetica",10)
+    for label,key in (("Invoice No","invoice_no"),("Date","date"),("Customer","customer"),("Customer Mobile","customer_mobile"),("Customer Address","customer_address"),("Batch","batch"),("Quantity","quantity"),("Rate/Kg","rate"),("Gross Amount","gross"),("Discount","discount"),("Net Amount","net"),("Paid","paid"),("Due","due"),("Payment Mode","payment_mode"),("Notes","notes")):
+        pdf.drawString(55,y,f"{label}: {data[key]}");y-=19
+    pdf.save();return path
+
+def print_pdf_windows(path):
+    if os.name!="nt":raise OSError("Direct printing is supported on Windows only")
+    os.startfile(os.path.abspath(path),"print")
 
 
 class SalesPage:
@@ -64,6 +85,7 @@ class SalesPage:
         tk.Button(bottom, text="🗑️ Delete Selected", command=self.delete_sale, bg="#e74c3c", fg="white", font=("Arial", 10, "bold"), padx=15, pady=6).pack(side="left", padx=5)
         tk.Button(bottom, text="🧾 View Invoice", command=self.view_invoice, bg="#8e44ad", fg="white", font=("Arial", 10, "bold"), padx=15, pady=6).pack(side="left", padx=5)
         tk.Button(bottom, text="📄 Save PDF", command=self.save_invoice_pdf, bg="#34495e", fg="white", font=("Arial", 10, "bold"), padx=15, pady=6).pack(side="left", padx=5)
+        tk.Button(bottom,text="🖨 Print",command=self.print_invoice,padx=15,pady=6).pack(side="left",padx=5)
 
     @staticmethod
     def create_card(parent, title, value):
@@ -148,7 +170,7 @@ class SalesPage:
             with get_connection() as conn:
                 old = conn.execute("""
                     SELECT invoice_no, sale_date, customer_id, quantity_kg,
-                           rate_per_kg, discount, paid_amount, payment_mode, notes
+                           rate_per_kg, discount, paid_amount, payment_mode, notes, batch_id
                     FROM sales WHERE id=?
                 """, (sale_id,)).fetchone()
             if not old:
@@ -192,6 +214,12 @@ class SalesPage:
         if old and old[2] in customer_ids:
             customer.current(customer_ids.index(old[2]))
         row += 1
+
+        with get_connection() as conn:batches=conn.execute("SELECT id,batch_no FROM batches ORDER BY batch_no").fetchall()
+        tk.Label(form,text="Batch").grid(row=row,column=0,sticky="w",pady=7)
+        batch=ttk.Combobox(form,values=["Unallocated / Legacy"]+[b[1] for b in batches],state="readonly",width=32);batch.grid(row=row,column=1,pady=7);batch.current(0)
+        if old and old[9] in [b[0] for b in batches]:batch.current([b[0] for b in batches].index(old[9])+1)
+        row+=1
 
         for label in ("Quantity (Kg)", "Rate / Kg", "Discount", "Paid Amount"):
             tk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=7)
@@ -246,20 +274,8 @@ class SalesPage:
                 try: total=self.validate_sale(qty,rate,discount,paid,available)
                 except OverflowError as error: messagebox.showerror("Insufficient Stock",str(error),parent=window);return
                 customer_id = customer_ids[customer.current()] if customer.current() >= 0 else None
-                values = (invoice, sale_date, customer_id, qty, rate, discount, total, paid, payment.get(), notes.get().strip())
-                with get_connection() as conn:
-                    if old:
-                        conn.execute("""
-                            UPDATE sales SET invoice_no=?, sale_date=?, customer_id=?, quantity_kg=?,
-                            rate_per_kg=?, discount=?, total_amount=?, paid_amount=?, payment_mode=?, notes=?
-                            WHERE id=?
-                        """, values + (sale_id,))
-                    else:
-                        conn.execute("""
-                            INSERT INTO sales (invoice_no, sale_date, customer_id, quantity_kg,
-                            rate_per_kg, discount, total_amount, paid_amount, payment_mode, notes)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, values)
+                batch_id=batches[batch.current()-1][0] if batch.current()>0 else None
+                save_sale_record({"invoice_no":invoice,"sale_date":sale_date,"customer_id":customer_id,"batch_id":batch_id,"quantity_kg":qty,"rate_per_kg":rate,"discount":discount,"paid_amount":paid,"payment_mode":payment.get(),"notes":notes.get().strip()},sale_id)
                 messagebox.showinfo("Success", "Sale saved successfully!", parent=window)
                 window.destroy()
                 self.load_sales()
@@ -288,24 +304,24 @@ class SalesPage:
         values = self._selected_values()
         if not values or not messagebox.askyesno("Confirm Delete", "এই sale delete করতে চান?", parent=self.frame):
             return
-        with get_connection() as conn:
-            conn.execute("DELETE FROM sales WHERE id=?", (values[0],))
+        delete_sale_record(int(values[0]))
         self.load_sales()
 
     def view_invoice(self):
         values = self._selected_values()
         if not values:
             return
-        window = tk.Toplevel(self.parent)
+        data=invoice_data(int(values[0]));window = tk.Toplevel(self.parent)
         window.title(f"Invoice - {values[1]}")
         window.geometry("500x600")
         invoice = tk.Frame(window, bg="white", padx=30, pady=30)
         invoice.pack(fill="both", expand=True)
-        tk.Label(invoice, text="🍄 OYSTER MUSHROOM", font=("Arial", 20, "bold"), bg="white").pack()
+        tk.Label(invoice, text=data["business_name"], font=("Arial", 20, "bold"), bg="white").pack()
+        tk.Label(invoice,text=" · ".join(x for x in (data["address"],data["mobile"],f"GSTIN: {data['gstin']}" if data['gstin'] else "") if x),bg="white",wraplength=430).pack()
         tk.Label(invoice, text="SALES INVOICE", font=("Arial", 14), bg="white").pack(pady=5)
         ttk.Separator(invoice).pack(fill="x", pady=15)
-        labels = ("Invoice No.", "Date", "Customer", "Quantity", "Rate", "Discount", "Total", "Paid", "Due", "Payment")
-        shown = (values[1], values[2], values[3], f"{values[4]} Kg", values[5], values[6], values[7], values[8], values[9], values[10])
+        labels=("Invoice No.","Date","Customer","Customer Mobile","Customer Address","Batch","Quantity","Rate","Gross","Discount","Net Total","Paid","Due","Payment","Notes")
+        shown=tuple(data[k] for k in ("invoice_no","date","customer","customer_mobile","customer_address","batch","quantity","rate","gross","discount","net","paid","due","payment_mode","notes"))
         for label, value in zip(labels, shown):
             line = tk.Frame(invoice, bg="white")
             line.pack(fill="x", pady=5)
@@ -318,9 +334,11 @@ class SalesPage:
         values = self._selected_values()
         if not values:
             return
+        data=invoice_data(int(values[0]))
         try:
             from reportlab.lib.pagesizes import A4
             from reportlab.pdfgen import canvas
+            from reportlab.lib.utils import ImageReader
         except ImportError:
             messagebox.showerror("ReportLab Missing", "PDF-এর জন্য install করুন: pip install reportlab", parent=self.frame)
             return
@@ -329,17 +347,15 @@ class SalesPage:
         path = filedialog.asksaveasfilename(initialfile=f"{values[1]}.pdf", defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
         if not path:
             return
-        pdf=canvas.Canvas(path,pagesize=A4); width,height=A4; y=height-55
-        pdf.setFont("Helvetica-Bold",18);pdf.drawCentredString(width/2,y,setting("business_name","Oyster Mushroom Business"));y-=24
-        pdf.setFont("Helvetica",10)
-        for line in (setting("address"),f"Mobile: {setting('mobile')}  Email: {setting('email')}",f"GSTIN: {setting('gstin')}"):
-            if line:pdf.drawCentredString(width/2,y,line);y-=15
-        y-=15;pdf.setFont("Helvetica-Bold",15);pdf.drawString(55,y,"SALES INVOICE");y-=28;pdf.setFont("Helvetica",11)
-        labels=("Invoice No","Date","Customer","Quantity","Rate/Kg","Discount","Grand Total","Paid","Due","Payment Mode")
-        shown=(values[1],values[2],values[3],f"{values[4]} Kg",values[5],values[6],values[7],values[8],values[9],values[10])
-        for label,value in zip(labels,shown):pdf.drawString(60,y,f"{label}: {value}");y-=22
-        pdf.setFont("Helvetica-Bold",12);pdf.drawCentredString(width/2,80,"Thank You!");pdf.save()
-        messagebox.showinfo("PDF",f"Invoice saved:\n{path}",parent=self.frame)
+        generate_invoice_pdf_file(int(values[0]),path)
+        if messagebox.askyesno("PDF",f"Invoice saved:\n{path}\n\nOpen now?",parent=self.frame):os.startfile(path)
+
+    def print_invoice(self):
+        values=self._selected_values()
+        if not values:return
+        try:
+            path=os.path.join(tempfile.gettempdir(),f"{values[1]}.pdf");generate_invoice_pdf_file(int(values[0]),path);print_pdf_windows(path);messagebox.showinfo("Print","Invoice printer queue-তে পাঠানো হয়েছে।",parent=self.frame)
+        except Exception as e:messagebox.showerror("Print Error",f"Direct print unavailable: {e}\nPDF Save ব্যবহার করুন।",parent=self.frame)
 
     def show(self):
         self.frame.pack(fill="both", expand=True)

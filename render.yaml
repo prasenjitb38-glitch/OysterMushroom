@@ -7,3 +7,11 @@ services:
     envVars:
       - key: SECRET_KEY
         generateValue: true
+      - key: APP_ENV
+        value: production
+      - key: MUSHROOM_DATA_DIR
+        value: /var/data
+    disk:
+      name: mushroom-data
+      mountPath: /var/data
+      sizeGB: 1

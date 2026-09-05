@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from database import get_connection
+from services import customer_statement,supplier_statement
 
 
 class PartyPage:
@@ -123,17 +124,15 @@ class PartyPage:
     def history(self):
         record_id=self.selected_id()
         if not record_id: return
-        window=tk.Toplevel(self.parent); window.title(f"{self.kind} History"); window.geometry("850x450")
-        if self.kind=="Customer":
-            columns=("Invoice","Date","Quantity","Amount","Paid","Due")
-            with get_connection() as conn: rows=conn.execute("SELECT invoice_no,sale_date,quantity_kg,total_amount,paid_amount,total_amount-paid_amount FROM sales WHERE customer_id=? ORDER BY sale_date DESC,id DESC",(record_id,)).fetchall()
-        else:
-            columns=("Invoice","Date","Item","Quantity","Amount","Paid","Due")
-            with get_connection() as conn: rows=conn.execute("SELECT COALESCE(purchase_invoice,''),purchase_date,item,quantity,total_amount,paid_amount,total_amount-paid_amount FROM purchases WHERE supplier_id=? ORDER BY purchase_date DESC,id DESC",(record_id,)).fetchall()
-        tree=ttk.Treeview(window,columns=columns,show="headings")
+        window=tk.Toplevel(self.parent); window.title(f"{self.kind} Statement"); window.geometry("850x500");bar=tk.Frame(window);bar.pack(fill="x",padx=15,pady=8);tk.Label(bar,text="From").pack(side="left");start=tk.Entry(bar,width=12);start.pack(side="left");tk.Label(bar,text="To").pack(side="left");end=tk.Entry(bar,width=12);end.pack(side="left")
+        columns=("Date","Reference","Debit","Credit","Balance");tree=ttk.Treeview(window,columns=columns,show="headings")
         for col in columns: tree.heading(col,text=col); tree.column(col,width=115,anchor="center")
-        for row in rows: tree.insert("","end",values=row)
-        tree.pack(fill="both",expand=True,padx=15,pady=15)
+        tree.pack(fill="both",expand=True,padx=15,pady=8);opening_label=tk.Label(window,font=("Arial",11,"bold"));opening_label.pack()
+        def load():
+            for x in tree.get_children():tree.delete(x)
+            opening,rows=(customer_statement if self.kind=="Customer" else supplier_statement)(record_id,start.get().strip() or None,end.get().strip() or None);opening_label.config(text=f"Opening Balance: ₹{opening:,.2f}")
+            for row in rows:tree.insert("","end",values=(row[0],row[1],f"₹{row[2]:,.2f}",f"₹{row[3]:,.2f}",f"₹{row[4]:,.2f}"))
+        tk.Button(bar,text="Filter",command=load).pack(side="left",padx=6);load()
 
     def show(self): self.frame.pack(fill="both", expand=True)
 

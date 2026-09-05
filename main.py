@@ -21,9 +21,11 @@ from modules.suppliers import SupplierPage
 from modules.reports import ReportsPage
 from modules.settings import SettingsPage
 from modules.users import UsersPage
-from modules.system_tools import authenticate
-from services import customer_outstanding, labour_due, mushroom_stock, pnl, supplier_outstanding
+from modules.system_tools import authenticate,ChangePasswordPage
+from services import require_permission,set_desktop_role
+from services import customer_outstanding, labour_due, mushroom_stock, pnl, supplier_outstanding,low_stock_materials
 from ui_theme import COLORS, configure_theme, polish_widgets
+from events import subscribe,unsubscribe
 
 
 create_database()
@@ -33,6 +35,7 @@ class MushroomApp:
     def __init__(self, root, user=None):
         self.root = root
         self.user = user or {"username": "admin", "role": "ADMIN", "name": "Administrator"}
+        set_desktop_role(self.user.get("role"))
         configure_theme(self.root)
         self.root.title("Oyster Mushroom Business Manager")
         self.root.geometry("1200x700")
@@ -40,6 +43,7 @@ class MushroomApp:
 
         self.create_sidebar()
         self.create_dashboard()
+        subscribe(self._data_changed);self.root.bind("<Destroy>",lambda e:unsubscribe(self._data_changed) if e.widget is self.root else None)
         self.root.after_idle(lambda: polish_widgets(self.root))
 
     def create_sidebar(self):
@@ -87,6 +91,8 @@ class MushroomApp:
             ("💾  Backup/Restore", self.backup_restore),
             ("⚙️  Settings", self.settings),
             ("🔐  Users", self.users),
+            ("🔑  Change Password", self.change_password),
+            ("↪  Logout", self.logout),
         ]
 
         if self.user.get("role") == "STAFF":
@@ -124,6 +130,7 @@ class MushroomApp:
         self.root.after_idle(lambda: polish_widgets(self.main_area))
 
     def show_dashboard(self):
+        self.current_page="dashboard"
         self.clear_main()
 
         with get_connection() as conn:
@@ -160,6 +167,7 @@ class MushroomApp:
         customer_due = customer_outstanding()
         supplier_due = supplier_outstanding()
         worker_due = labour_due()
+        low_materials=low_stock_materials()
 
         heading = tk.Frame(self.main_area, bg="#f3f4f6")
         heading.pack(fill="x", padx=30, pady=(25, 5))
@@ -268,6 +276,10 @@ class MushroomApp:
 
         if not recent_rows:
             tree.insert("", "end", values=("No production data available yet.", "", "", "", "", ""))
+        if low_materials:
+            tk.Label(self.main_area,text="⚠ Low Stock: "+", ".join(f"{r[1]} ({r[3]:.2f} {r[2]})" for r in low_materials),bg="#fff3cd",fg="#856404",font=("Arial",10,"bold"),anchor="w").pack(fill="x",padx=30,pady=5)
+    def _data_changed(self,event):
+        if getattr(self,"current_page",None)=="dashboard":self.root.after_idle(self.show_dashboard)
 
     def page_message(self, title):
         self.clear_main()
@@ -380,7 +392,13 @@ class MushroomApp:
         self.clear_main(); self.settings_page = SettingsPage(self.main_area); self.settings_page.show()
 
     def users(self):
-        self.clear_main(); self.users_page = UsersPage(self.main_area); self.users_page.show()
+        try:require_permission(self.user.get("role"),"users")
+        except PermissionError:return messagebox.showerror("Forbidden","Admin permission required.",parent=self.root)
+        self.clear_main(); self.users_page = UsersPage(self.main_area,self.user); self.users_page.show()
+    def change_password(self):
+        self.clear_main();self.change_password_page=ChangePasswordPage(self.main_area,self.user);self.change_password_page.show()
+    def logout(self):
+        self.root.destroy()
 
 
 def login_dialog(root):
@@ -392,7 +410,7 @@ def login_dialog(root):
     def submit():
         row=authenticate(username.get().strip(),password.get())
         if not row:messagebox.showerror("Login Failed","Username/password সঠিক নয়।",parent=window);return
-        result.update({"id":row[0],"username":username.get().strip(),"role":row[2],"name":row[4]});window.destroy()
+        result.update({"id":row[0],"username":username.get().strip(),"role":row[2],"name":row[4],"must_change_password":bool(row[5])});window.destroy()
     tk.Button(window,text="Login",command=submit,bg="#2563eb",fg="white",padx=30,pady=7).pack(pady=22)
     window.protocol("WM_DELETE_WINDOW",lambda:(window.destroy(),root.destroy()))
     root.wait_window(window);return result or None
@@ -405,4 +423,5 @@ if __name__ == "__main__":
     if logged_in:
         root.deiconify()
         app = MushroomApp(root, logged_in)
+        if logged_in.get("must_change_password"):root.after(100,app.change_password)
         root.mainloop()

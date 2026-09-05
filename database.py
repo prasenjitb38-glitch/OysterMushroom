@@ -5,7 +5,7 @@ import secrets
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FOLDER = os.path.join(BASE_DIR, "database")
+DB_FOLDER = os.environ.get("MUSHROOM_DATA_DIR", os.path.join(BASE_DIR, "database"))
 DB_FILE = os.path.join(DB_FOLDER, "mushroom.db")
 
 
@@ -19,8 +19,10 @@ class DatabaseConnection(sqlite3.Connection):
 
 def get_connection():
     os.makedirs(DB_FOLDER, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE, factory=DatabaseConnection)
+    conn = sqlite3.connect(DB_FILE, factory=DatabaseConnection, timeout=15)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 15000")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -49,10 +51,44 @@ def verify_password(password, stored):
 def authenticate(username, password):
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id,password_hash,role,active,full_name FROM users WHERE username=?",
+            "SELECT id,password_hash,role,active,full_name,must_change_password FROM users WHERE username=?",
             (username,),
         ).fetchone()
     return row if row and row[3] and verify_password(password, row[1]) else None
+
+
+def validate_password(password):
+    if not isinstance(password, str) or len(password) < 8:
+        raise ValueError("Password must contain at least 8 characters")
+    if password.isspace():
+        raise ValueError("Password cannot be blank")
+    return True
+
+
+def change_password(user_id, current_password, new_password, admin_reset=False):
+    validate_password(new_password)
+    with get_connection() as conn:
+        row=conn.execute("SELECT password_hash FROM users WHERE id=?",(user_id,)).fetchone()
+        if not row or (not admin_reset and not verify_password(current_password,row[0])):raise ValueError("Current password is incorrect")
+        conn.execute("UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?",(hash_password(new_password),user_id))
+
+
+def set_user_active(user_id, active):
+    with get_connection() as conn:
+        row=conn.execute("SELECT role,active FROM users WHERE id=?",(user_id,)).fetchone()
+        if not row:raise ValueError("User not found")
+        if row[0].upper()=="ADMIN" and row[1] and not active:
+            count=conn.execute("SELECT COUNT(*) FROM users WHERE role='ADMIN' AND active=1").fetchone()[0]
+            if count<=1:raise ValueError("The last active Admin cannot be disabled")
+        conn.execute("UPDATE users SET active=? WHERE id=?",(1 if active else 0,user_id))
+
+def admin_reset_password(admin_id,user_id,new_password):
+    validate_password(new_password)
+    with get_connection() as conn:
+        admin=conn.execute("SELECT role,active FROM users WHERE id=?",(admin_id,)).fetchone()
+        if not admin or admin[0]!="ADMIN" or not admin[1]:raise PermissionError("Admin permission required")
+        if not conn.execute("SELECT 1 FROM users WHERE id=?",(user_id,)).fetchone():raise ValueError("User not found")
+        conn.execute("UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?",(hash_password(new_password),user_id))
 
 
 def create_database():
@@ -213,6 +249,17 @@ def create_database():
             notes TEXT,
             FOREIGN KEY(material_id) REFERENCES raw_materials(id)
         );
+        CREATE TABLE IF NOT EXISTS material_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            adjustment_date TEXT NOT NULL,
+            material_id INTEGER NOT NULL,
+            adjustment_type TEXT NOT NULL CHECK(adjustment_type IN ('IN','OUT')),
+            quantity REAL NOT NULL CHECK(quantity > 0),
+            batch_id INTEGER,
+            notes TEXT,
+            FOREIGN KEY(material_id) REFERENCES raw_materials(id) ON DELETE RESTRICT,
+            FOREIGN KEY(batch_id) REFERENCES batches(id) ON DELETE RESTRICT
+        );
         CREATE TABLE IF NOT EXISTS labour (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             worker_name TEXT NOT NULL,
@@ -296,9 +343,24 @@ def create_database():
     ):
         _add_column(cursor, "purchases", definition)
     _add_column(cursor, "sales", "batch_no TEXT")
+    _add_column(cursor, "sales", "batch_id INTEGER")
+    _add_column(cursor, "daily_production", "batch_id INTEGER")
+    _add_column(cursor, "harvests", "batch_id INTEGER")
+    _add_column(cursor, "expenses", "batch_id INTEGER")
+    _add_column(cursor, "labour", "batch_id INTEGER")
+    _add_column(cursor, "purchases", "batch_id INTEGER")
+    _add_column(cursor, "purchases", "material_id INTEGER")
+    _add_column(cursor, "material_usage", "batch_id INTEGER")
     _add_column(cursor, "expenses", "notes TEXT")
     _add_column(cursor, "cash_ledger", "source_table TEXT")
     _add_column(cursor, "cash_ledger", "source_id INTEGER")
+
+    # Backfill relational keys without invalidating legacy/unallocated records.
+    for table in ("sales", "daily_production", "harvests", "expenses", "labour", "purchases", "material_usage"):
+        cursor.execute(f"""UPDATE {table} SET batch_id=(SELECT id FROM batches b
+            WHERE b.batch_no={table}.batch_no) WHERE batch_id IS NULL AND COALESCE(batch_no,'')!=''""")
+    cursor.execute("""UPDATE purchases SET material_id=(SELECT id FROM raw_materials r
+        WHERE r.item=purchases.item) WHERE material_id IS NULL""")
 
     defaults = {
         "business_name": "Oyster Mushroom Business",
@@ -342,6 +404,33 @@ def create_database():
         CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_ledger_source
         ON cash_ledger(source_table, source_id)
         WHERE source_table IS NOT NULL AND source_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_sales_batch_id ON sales(batch_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_material ON material_usage(material_id);
+        CREATE INDEX IF NOT EXISTS idx_adjustment_material ON material_adjustments(material_id);
+        CREATE INDEX IF NOT EXISTS idx_customer_payments_party ON customer_payments(customer_id);
+        CREATE INDEX IF NOT EXISTS idx_supplier_payments_party ON supplier_payments(supplier_id);
+        CREATE INDEX IF NOT EXISTS idx_labour_payments_party ON labour_payments(labour_id);
+
+        DROP TRIGGER IF EXISTS protect_ledger_update;
+        DROP TRIGGER IF EXISTS protect_ledger_delete;
+        CREATE TRIGGER IF NOT EXISTS sales_customer_valid_insert BEFORE INSERT ON sales
+        WHEN NEW.customer_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM customers WHERE id=NEW.customer_id)
+        BEGIN SELECT RAISE(ABORT,'invalid customer'); END;
+        CREATE TRIGGER IF NOT EXISTS sales_batch_valid_insert BEFORE INSERT ON sales
+        WHEN NEW.batch_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM batches WHERE id=NEW.batch_id)
+        BEGIN SELECT RAISE(ABORT,'invalid batch'); END;
+        CREATE TRIGGER IF NOT EXISTS purchases_supplier_valid_insert BEFORE INSERT ON purchases
+        WHEN NEW.supplier_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM suppliers WHERE id=NEW.supplier_id)
+        BEGIN SELECT RAISE(ABORT,'invalid supplier'); END;
+        CREATE TRIGGER IF NOT EXISTS purchases_material_valid_insert BEFORE INSERT ON purchases
+        WHEN NEW.material_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM raw_materials WHERE id=NEW.material_id)
+        BEGIN SELECT RAISE(ABORT,'invalid material'); END;
+        CREATE TRIGGER IF NOT EXISTS protect_customer_delete BEFORE DELETE ON customers
+        WHEN EXISTS(SELECT 1 FROM sales WHERE customer_id=OLD.id)
+        BEGIN SELECT RAISE(ABORT,'customer has sales'); END;
+        CREATE TRIGGER IF NOT EXISTS protect_supplier_delete BEFORE DELETE ON suppliers
+        WHEN EXISTS(SELECT 1 FROM purchases WHERE supplier_id=OLD.id)
+        BEGIN SELECT RAISE(ABORT,'supplier has purchases'); END;
     """)
 
     conn.commit()

@@ -120,7 +120,7 @@ class StockPage:
                            ' Kg; Wastage: ' || printf('%.2f', wastage_kg) || ' Kg'
                     FROM harvests
                     UNION ALL
-                    SELECT id, sale_date, 'Sale', '', -quantity_kg, COALESCE(notes, '') FROM sales
+                    SELECT id, sale_date, 'Sale', COALESCE(batch_no,''), -quantity_kg, COALESCE(notes, '') FROM sales
                 ) ORDER BY entry_date DESC, source_id DESC
             """).fetchall()
 
@@ -140,10 +140,9 @@ class StockPage:
                     SELECT COALESCE(SUM(quantity_kg), 0), COALESCE(SUM(wastage_kg), 0)
                     FROM harvests WHERE batch_no=?
                 """, (batch_no,)).fetchone()
-                # Temporary bridge until the Sales module gets a dedicated batch_no column.
                 sales = conn.execute("""
-                    SELECT COALESCE(SUM(quantity_kg), 0) FROM sales WHERE notes LIKE ?
-                """, (f"%{batch_no}%",)).fetchone()[0] or 0
+                    SELECT COALESCE(SUM(s.quantity_kg), 0) FROM sales s JOIN batches b ON b.id=s.batch_id WHERE b.batch_no=?
+                """, (batch_no,)).fetchone()[0] or 0
                 batch_rows.append((
                     batch_no, adjustment, production, sales, wastage,
                     adjustment + production - wastage - sales

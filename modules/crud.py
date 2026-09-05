@@ -7,9 +7,10 @@ from database import get_connection
 
 
 class CrudPage:
-    def __init__(self, parent, title, table, fields, date_field=None, compute=None):
+    def __init__(self, parent, title, table, fields, date_field=None, compute=None, saver=None, deleter=None):
         self.parent, self.title, self.table = parent, title, table
         self.fields, self.date_field, self.compute = fields, date_field, compute
+        self.saver,self.deleter=saver,deleter
         self.frame = tk.Frame(parent, bg="#f5f6fa")
         self.build(); self.load()
 
@@ -70,9 +71,11 @@ class CrudPage:
                 if self.compute:
                     updates=self.compute(data)
                     for key,val in updates.items(): values[[f[0] for f in self.fields].index(key)]=val
-                with get_connection() as conn:
-                    if old: conn.execute(f"UPDATE {self.table} SET "+",".join(f"{x[0]}=?" for x in self.fields)+" WHERE id=?",tuple(values)+(record_id,))
-                    else: conn.execute(f"INSERT INTO {self.table}({','.join(x[0] for x in self.fields)}) VALUES({','.join('?' for _ in values)})",values)
+                if self.saver:self.saver(data,record_id)
+                else:
+                    with get_connection() as conn:
+                        if old: conn.execute(f"UPDATE {self.table} SET "+",".join(f"{x[0]}=?" for x in self.fields)+" WHERE id=?",tuple(values)+(record_id,))
+                        else: conn.execute(f"INSERT INTO {self.table}({','.join(x[0] for x in self.fields)}) VALUES({','.join('?' for _ in values)})",values)
                 win.destroy(); self.load()
             except (ValueError,ZeroDivisionError): messagebox.showerror("Error","Required fields ও non-negative numeric values পরীক্ষা করুন।",parent=win)
             except sqlite3.Error as e: messagebox.showerror("Database Error",str(e),parent=win)
@@ -86,7 +89,9 @@ class CrudPage:
         i=self.selected()
         if i and messagebox.askyesno("Confirm","Record delete করবেন?",parent=self.frame):
             try:
-                with get_connection() as conn: conn.execute(f"DELETE FROM {self.table} WHERE id=?",(i,))
+                if self.deleter:self.deleter(i)
+                else:
+                    with get_connection() as conn: conn.execute(f"DELETE FROM {self.table} WHERE id=?",(i,))
                 self.load()
             except sqlite3.Error as e: messagebox.showerror("Database Error",str(e),parent=self.frame)
     def show(self): self.frame.pack(fill="both",expand=True)

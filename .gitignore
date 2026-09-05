@@ -5,3 +5,14 @@ venv/
 *.log
 database/*.db-journal
 database/*.db
+database/*.db-wal
+database/*.db-shm
+.env
+.env.*
+!.env.example
+*.pdf
+invoices/
+generated/
+charts/
+*.png
+!static/*.png

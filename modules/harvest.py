@@ -4,6 +4,7 @@ from datetime import date
 from tkinter import messagebox, ttk
 
 from database import get_connection
+from events import publish
 
 
 class HarvestPage:
@@ -187,20 +188,21 @@ class HarvestPage:
                     return
                 values = (harvest_date, batch_no, int(flush_var.get()), quantity, wastage, grade_var.get(), notes.get().strip())
                 with get_connection() as conn:
-                    exists = conn.execute("SELECT 1 FROM batches WHERE batch_no = ?", (batch_no,)).fetchone()
+                    exists = conn.execute("SELECT id FROM batches WHERE batch_no = ?", (batch_no,)).fetchone()
                     if not exists:
                         messagebox.showerror("Error", f"Batch '{batch_no}' পাওয়া যায়নি।", parent=window)
                         return
                     if record:
                         conn.execute("""
                             UPDATE harvests SET harvest_date=?, batch_no=?, flush_no=?,
-                            quantity_kg=?, wastage_kg=?, grade=?, notes=? WHERE id=?
-                        """, values + (record[0],))
+                            quantity_kg=?, wastage_kg=?, grade=?, notes=?,batch_id=? WHERE id=?
+                        """, values + (exists[0],record[0]))
                     else:
                         conn.execute("""
                             INSERT INTO harvests (harvest_date, batch_no, flush_no,
-                            quantity_kg, wastage_kg, grade, notes) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """, values)
+                            quantity_kg, wastage_kg, grade, notes,batch_id) VALUES (?, ?, ?, ?, ?, ?, ?,?)
+                        """, values+(exists[0],))
+                publish("harvest_changed")
                 messagebox.showinfo("Success", "Harvest updated successfully!" if record else "Harvest saved successfully!", parent=window)
                 window.destroy()
                 self.show_harvest_records()
@@ -242,6 +244,7 @@ class HarvestPage:
             return
         with get_connection() as conn:
             conn.execute("DELETE FROM harvests WHERE id=?", (record_id,))
+        publish("harvest_changed")
         self.show_harvest_records()
         self.show_summary()
 
