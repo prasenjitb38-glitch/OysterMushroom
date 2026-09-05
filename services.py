@@ -271,9 +271,21 @@ def save_purchase(data, record_id=None):
     with get_connection() as conn:
         qty=float(data["quantity"]);rate=float(data["rate"]);paid=float(data.get("paid_amount",0));total=qty*rate
         if qty<0 or rate<0 or paid<0 or paid>total:raise ValueError("Invalid purchase")
-        material=conn.execute("SELECT item,unit FROM raw_materials WHERE id=?",(data.get("material_id"),)).fetchone()
+        material_id=data.get("material_id")
+        material=conn.execute("SELECT item,unit FROM raw_materials WHERE id=?",(material_id,)).fetchone()
         if not material:raise ValueError("Invalid material")
-        vals=(data["purchase_date"],data.get("purchase_invoice",""),data.get("supplier_id"),material[0],data["material_id"],qty,data.get("unit") or material[1],rate,total,paid,total-paid,data.get("batch_no",""),data.get("payment_mode","Cash"),data.get("notes",""))
+        if " ".join(material[0].split()).casefold()=="other":
+            custom_name=" ".join((data.get("material_name") or "").split())
+            if not custom_name:raise ValueError("Material Name is required when Raw Material is Other")
+            existing=None
+            for candidate in conn.execute("SELECT id,item,unit FROM raw_materials"):
+                if " ".join(candidate[1].split()).casefold()==custom_name.casefold():existing=candidate;break
+            if existing:material_id,material_name,material_unit=existing
+            else:
+                material_unit=(data.get("unit") or "Kg").strip() or "Kg"
+                material_id=conn.execute("INSERT INTO raw_materials(item,unit,opening_stock,reorder_level) VALUES(?,?,0,0)",(custom_name,material_unit)).lastrowid;material_name=custom_name
+            material=(material_name,material_unit)
+        vals=(data["purchase_date"],data.get("purchase_invoice",""),data.get("supplier_id"),material[0],material_id,qty,material[1],rate,total,paid,total-paid,data.get("batch_no",""),data.get("payment_mode","Cash"),data.get("notes",""))
         if record_id:conn.execute("UPDATE purchases SET purchase_date=?,purchase_invoice=?,supplier_id=?,item=?,material_id=?,quantity=?,unit=?,rate=?,total_amount=?,paid_amount=?,due_amount=?,batch_no=?,payment_mode=?,notes=? WHERE id=?",vals+(record_id,))
         else:record_id=conn.execute("INSERT INTO purchases(purchase_date,purchase_invoice,supplier_id,item,material_id,quantity,unit,rate,total_amount,paid_amount,due_amount,batch_no,payment_mode,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",vals).lastrowid
         post_ledger(conn,"purchases",record_id,data["purchase_date"],"PURCHASE PAYMENT",data.get("payment_mode","Cash"),paid,False,data.get("purchase_invoice",""),data.get("notes",""));publish("purchase_changed");return record_id

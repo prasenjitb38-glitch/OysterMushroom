@@ -362,6 +362,28 @@ class AppTests(unittest.TestCase):
         with client.session_transaction() as s:s["user"]={"id":2,"name":"Staff","role":"STAFF","must_change_password":False};s["csrf_token"]="web-token"
         self.assertNotIn("+ New Customer",client.get("/customers").get_data(as_text=True));self.assertEqual(client.get("/manage/purchase/new").status_code,403);self.assertEqual(client.get("/manage/user/new").status_code,403)
 
+    def test_browser_purchase_other_material_creation_reuse_and_reversal(self):
+        import web_app
+        self.services.set_desktop_role("ADMIN");client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="other-token"
+        with database.get_connection() as c:
+            supplier=c.execute("INSERT INTO suppliers(name) VALUES('Other Supplier')").lastrowid;other=c.execute("SELECT id FROM raw_materials WHERE LOWER(TRIM(item))='other'").fetchone()[0];polybag=c.execute("SELECT id FROM raw_materials WHERE item='Polybag'").fetchone()[0]
+        def post(path,**data):data["csrf_token"]="other-token";response=client.post(path,data=data);self.assertEqual(response.status_code,302,(path,response.get_data(as_text=True)));return response
+        def purchase(invoice,name,quantity,unit="Kg",material_id=None):post("/manage/purchase/new",purchase_date="2026-09-05",purchase_invoice=invoice,supplier_id=str(supplier),material_id=str(material_id or other),material_name=name,batch_no="",quantity=str(quantity),unit=unit,rate="5",paid_amount="0",payment_mode="Credit",notes="")
+        form=client.get("/manage/purchase/new").get_data(as_text=True);self.assertIn("Material Name",form);self.assertIn("data-unit=",form);self.assertIn("n.required=other",form)
+        purchase("OTHER-1","Wood Dust",50)
+        with database.get_connection() as c:
+            rows=[r for r in c.execute("SELECT id,item,unit FROM raw_materials") if " ".join(r[1].split()).casefold()=="wood dust"];self.assertEqual(len(rows),1);material_id=rows[0][0];self.assertEqual(rows[0][2],"Kg");first=c.execute("SELECT id,item,unit FROM purchases WHERE purchase_invoice='OTHER-1'").fetchone();self.assertEqual((first[1],first[2]),("Wood Dust","Kg"))
+        self.assertEqual(self.services.raw_material_stock(material_id),50)
+        purchase("OTHER-2","  wood   dust  ",10,"Litre")
+        with database.get_connection() as c:self.assertEqual(sum(1 for r in c.execute("SELECT item FROM raw_materials") if " ".join(r[0].split()).casefold()=="wood dust"),1);second=c.execute("SELECT id,material_id,unit FROM purchases WHERE purchase_invoice='OTHER-2'").fetchone();self.assertEqual((second[1],second[2]),(material_id,"Kg"))
+        self.assertEqual(self.services.raw_material_stock(material_id),60)
+        post(f"/manage/purchase/{first[0]}/edit",purchase_date="2026-09-05",purchase_invoice="OTHER-1",supplier_id=str(supplier),material_id=str(material_id),material_name="",batch_no="",quantity="70",unit="Litre",rate="5",paid_amount="0",payment_mode="Credit",notes="");self.assertEqual(self.services.raw_material_stock(material_id),80)
+        post(f"/manage/purchase/{first[0]}/delete");self.assertEqual(self.services.raw_material_stock(material_id),10)
+        post(f"/manage/purchase/{second[0]}/delete");self.assertEqual(self.services.raw_material_stock(material_id),0)
+        purchase("UNIT-1","",5,"Kg",polybag)
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT unit FROM purchases WHERE purchase_invoice='UNIT-1'").fetchone()[0],"Piece")
+
     def test_customer_credit_payment_can_be_reduced_after_sale_deleted(self):
         from modules.accounts import record_payment,update_payment
         self.services.set_desktop_role("ADMIN")

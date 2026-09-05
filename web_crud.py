@@ -25,10 +25,13 @@ def guard(resource,operation):
 def opts(sql):
     with get_connection() as c:return [(str(r[0]),str(r[1])) for r in c.execute(sql)]
 
+def _rows(sql):
+    with get_connection() as c:return c.execute(sql).fetchall()
+
 def definition(resource):
     choices={
       "supplier":[],"customer":[],
-      "purchase":[("supplier_id","Supplier","select",opts("SELECT id,name FROM suppliers ORDER BY name")),("material_id","Raw Material","select",opts("SELECT id,item FROM raw_materials ORDER BY item")),("batch_no","Batch","select",[("","Not linked")]+opts("SELECT batch_no,batch_no FROM batches ORDER BY batch_no"))],
+      "purchase":[("supplier_id","Supplier","select",opts("SELECT id,name FROM suppliers ORDER BY name")),("material_id","Raw Material","select",[(str(i),str(name),str(unit)) for i,name,unit in _rows("SELECT id,item,unit FROM raw_materials ORDER BY item")]),("material_name","Material Name","text",None),("batch_no","Batch","select",[("","Not linked")]+opts("SELECT batch_no,batch_no FROM batches ORDER BY batch_no"))],
       "production":[("batch_id","Batch","select",opts("SELECT id,batch_no FROM batches ORDER BY batch_no"))],
       "harvest":[("batch_id","Batch","select",opts("SELECT id,batch_no FROM batches ORDER BY batch_no"))],
       "sale":[("customer_id","Customer","select",[("","Cash Customer")]+opts("SELECT id,name FROM customers ORDER BY name")),("batch_id","Exact Batch","select",opts("SELECT id,batch_no FROM batches ORDER BY batch_no"))],
@@ -64,7 +67,8 @@ def existing(resource,record_id,fields):
         if not row:raise ValueError("Payment not found")
         types={"customer_payments":"CUSTOMER PAYMENT","supplier_payments":"SUPPLIER PAYMENT","labour_payments":"LABOUR PAYMENT"}
         return {"payment_date":row[0],"party":f"{types.get(row[1],'')}|{row[2]}","amount":row[4] if row[4] else row[3],"payment_mode":row[5],"reference":row[6] or "","notes":row[7] or ""}
-    names=[x[0] for x in fields if not (resource=="user" and x[0]=="password")]
+    virtual={"password"} if resource=="user" else ({"material_name"} if resource=="purchase" else set())
+    names=[x[0] for x in fields if x[0] not in virtual]
     with get_connection() as c:row=c.execute(f"SELECT {','.join(names)} FROM {TABLE[resource]} WHERE id=?",(record_id,)).fetchone()
     if not row:raise ValueError("Record not found")
     data=dict(zip(names,row))
@@ -131,6 +135,7 @@ def resource_form(resource,record_id=None):
     denied=guard(resource,"edit" if record_id else "create")
     if denied:return denied
     fields=definition(resource)
+    values={}
     try:
         values=existing(resource,record_id,fields)
         if request.method=="POST":
