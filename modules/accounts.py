@@ -3,59 +3,8 @@ from datetime import date
 from tkinter import messagebox, ttk
 from database import get_connection
 from modules.crud import CrudPage
-from services import customer_outstanding, supplier_outstanding, labour_due, post_ledger, delete_manual_ledger,enforce_desktop
-from events import publish
-
-
-def record_payment(payment_date, payment_type, party_id, amount, mode, reference="", notes=""):
-    enforce_desktop("payments.create")
-    if amount <= 0: raise ValueError("Amount must be positive")
-    mapping={"CUSTOMER PAYMENT":("customer_payments","customer_id"),"SUPPLIER PAYMENT":("supplier_payments","supplier_id"),"LABOUR PAYMENT":("labour_payments","labour_id")}
-    with get_connection() as conn:
-        limits={"CUSTOMER PAYMENT":customer_outstanding(party_id,conn),"SUPPLIER PAYMENT":supplier_outstanding(party_id,conn),"LABOUR PAYMENT":labour_due(conn)}
-        if payment_type in limits and amount>limits[payment_type]+1e-9: raise ValueError("Payment exceeds outstanding due")
-        source_table = source_id = None
-        if payment_type in mapping:
-            table,column=mapping[payment_type]
-            source_table=table
-            source_id=conn.execute(f"INSERT INTO {table}(payment_date,{column},amount,payment_mode,reference_no,notes) VALUES(?,?,?,?,?,?)",(payment_date,party_id,amount,mode,reference,notes)).lastrowid
-        ledger_id=post_ledger(conn,source_table or "manual_payment",source_id or 0,payment_date,payment_type,mode,amount,payment_type in ("CUSTOMER PAYMENT","OTHER INCOME"),reference,notes)
-    publish("payment_changed");return ledger_id
-
-
-def delete_payment(ledger_id):
-    enforce_desktop("payments.delete")
-    with get_connection() as conn:
-        row=conn.execute("SELECT source_table,source_id FROM cash_ledger WHERE id=?",(ledger_id,)).fetchone()
-        if not row: return False
-        if row[0] in ("customer_payments","supplier_payments","labour_payments") and row[1] is not None:
-            conn.execute(f"DELETE FROM {row[0]} WHERE id=?",(row[1],))
-        conn.execute("DELETE FROM cash_ledger WHERE id=?",(ledger_id,))
-    publish("payment_changed");return True
-
-
-def update_payment(ledger_id, payment_date, payment_type, party_id, amount, mode, reference="", notes=""):
-    enforce_desktop("payments.edit")
-    if amount <= 0: raise ValueError("Amount must be positive")
-    mapping={"CUSTOMER PAYMENT":("customer_payments","customer_id"),"SUPPLIER PAYMENT":("supplier_payments","supplier_id"),"LABOUR PAYMENT":("labour_payments","labour_id")}
-    with get_connection() as conn:
-        old=conn.execute("SELECT source_table,source_id,transaction_type,debit,credit FROM cash_ledger WHERE id=?",(ledger_id,)).fetchone()
-        if not old: raise ValueError("Payment not found")
-        old_party=None
-        if old[0] in ("customer_payments","supplier_payments","labour_payments") and old[1] is not None:
-            party_column={"customer_payments":"customer_id","supplier_payments":"supplier_id","labour_payments":"labour_id"}[old[0]]
-            party_row=conn.execute(f"SELECT {party_column} FROM {old[0]} WHERE id=?",(old[1],)).fetchone();old_party=old_party if not party_row else old_party or party_row[0]
-        if old[0] in ("customer_payments","supplier_payments","labour_payments") and old[1] is not None:conn.execute(f"DELETE FROM {old[0]} WHERE id=?",(old[1],))
-        limits={"CUSTOMER PAYMENT":customer_outstanding(party_id,conn),"SUPPLIER PAYMENT":supplier_outstanding(party_id,conn),"LABOUR PAYMENT":labour_due(conn)}
-        allowed=limits.get(payment_type)
-        if allowed is not None and old[2]==payment_type and old_party==party_id:allowed=max(allowed,float(old[4] or old[3] or 0))
-        if allowed is not None and amount>allowed+1e-9: raise ValueError("Payment exceeds outstanding due")
-        source_table=source_id=None
-        if payment_type in mapping:
-            source_table,column=mapping[payment_type];source_id=conn.execute(f"INSERT INTO {source_table}(payment_date,{column},amount,payment_mode,reference_no,notes) VALUES(?,?,?,?,?,?)",(payment_date,party_id,amount,mode,reference,notes)).lastrowid
-        inflow=payment_type in ("CUSTOMER PAYMENT","OTHER INCOME")
-        conn.execute("UPDATE cash_ledger SET transaction_date=?,transaction_type=?,reference=?,payment_mode=?,debit=?,credit=?,notes=?,source_table=?,source_id=? WHERE id=?",(payment_date,payment_type,reference,mode,0 if inflow else amount,amount if inflow else 0,notes,source_table or "manual_payment",source_id or 0,ledger_id))
-        publish("payment_changed");return ledger_id
+from payment_service import delete_payment, record_payment, update_payment
+from services import delete_manual_ledger
 
 
 class PaymentPage:
@@ -75,7 +24,12 @@ class PaymentPage:
     def add(self, ledger_id=None):
         old=None
         if ledger_id:
-            with get_connection() as c: old=c.execute("SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit,notes,source_table,source_id FROM cash_ledger WHERE id=?",(ledger_id,)).fetchone()
+            with get_connection() as c:
+                old=c.execute("SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit,notes,source_table,source_id FROM cash_ledger WHERE id=?",(ledger_id,)).fetchone()
+                if old and old[7] in ("customer_payments","supplier_payments","labour_payments"):
+                    column={"customer_payments":"customer_id","supplier_payments":"supplier_id","labour_payments":"labour_id"}[old[7]]
+                    linked=c.execute(f"SELECT {column} FROM {old[7]} WHERE id=?",(old[8],)).fetchone()
+                    if linked:old=tuple(old[:8])+(linked[0],)
         w=tk.Toplevel(self.parent);w.title("New Payment");w.geometry("470x520");body=tk.Frame(w);body.pack(fill="x",padx=30,pady=20);widgets={};types=("CUSTOMER PAYMENT","SUPPLIER PAYMENT","LABOUR PAYMENT","OTHER PAYMENT","OTHER INCOME")
         for label in ("Date","Reference","Amount","Notes"):
             tk.Label(body,text=label).pack(anchor="w",pady=(7,2));e=tk.Entry(body);e.pack(fill="x");widgets[label]=e

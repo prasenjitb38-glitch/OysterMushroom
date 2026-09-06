@@ -2,6 +2,7 @@ import sqlite3
 from flask import Blueprint,current_app,flash,redirect,render_template,request,session,url_for
 
 from database import get_connection,hash_password,set_user_active,validate_password
+from payment_service import delete_payment, record_payment, update_payment
 from services import require_permission
 
 crud=Blueprint("crud",__name__,url_prefix="/manage")
@@ -64,9 +65,17 @@ def existing(resource,record_id,fields):
     if resource=="payment":
         with get_connection() as c:
             row=c.execute("SELECT transaction_date,source_table,source_id,debit,credit,payment_mode,reference,notes FROM cash_ledger WHERE id=?",(record_id,)).fetchone()
-        if not row:raise ValueError("Payment not found")
-        types={"customer_payments":"CUSTOMER PAYMENT","supplier_payments":"SUPPLIER PAYMENT","labour_payments":"LABOUR PAYMENT"}
-        return {"payment_date":row[0],"party":f"{types.get(row[1],'')}|{row[2]}","amount":row[4] if row[4] else row[3],"payment_mode":row[5],"reference":row[6] or "","notes":row[7] or ""}
+            if not row:raise ValueError("Payment not found")
+            sources={
+                "customer_payments":("CUSTOMER PAYMENT","customer_id"),
+                "supplier_payments":("SUPPLIER PAYMENT","supplier_id"),
+                "labour_payments":("LABOUR PAYMENT","labour_id"),
+            }
+            source=sources.get(row[1])
+            if not source:raise ValueError("Payment is not editable from this form")
+            payment=c.execute(f"SELECT {source[1]} FROM {row[1]} WHERE id=?",(row[2],)).fetchone()
+        if not payment:raise ValueError("Linked payment not found")
+        return {"payment_date":row[0],"party":f"{source[0]}|{payment[0]}","amount":row[4] if row[4] else row[3],"payment_mode":row[5],"reference":row[6] or "","notes":row[7] or ""}
     virtual={"password"} if resource=="user" else ({"material_name"} if resource=="purchase" else set())
     names=[x[0] for x in fields if x[0] not in virtual]
     with get_connection() as c:row=c.execute(f"SELECT {','.join(names)} FROM {TABLE[resource]} WHERE id=?",(record_id,)).fetchone()
@@ -106,7 +115,6 @@ def save(resource,data,record_id):
     if resource=="adjustment":return save_material_adjustment(data,record_id)
     if resource=="stock_adjustment":return save_stock_adjustment(data,record_id)
     if resource=="payment":
-        from modules.accounts import record_payment,update_payment
         payment_type,party_id=data["party"].split("|",1)
         args=(data["payment_date"],payment_type,int(party_id),data["amount"],data["payment_mode"],data["reference"],data["notes"])
         return update_payment(record_id,*args) if record_id else record_payment(*args)
@@ -128,7 +136,6 @@ def remove(resource,record_id):
     if resource=="adjustment":return delete_material_adjustment(record_id)
     if resource=="stock_adjustment":return delete_stock_adjustment(record_id)
     if resource=="payment":
-        from modules.accounts import delete_payment
         return delete_payment(record_id)
 
 @crud.route("/<resource>/new",methods=["GET","POST"])

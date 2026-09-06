@@ -1,8 +1,10 @@
-import io, os, secrets, time, tempfile
+import io, os, secrets, sqlite3, time, tempfile
 from functools import wraps
 from flask import Flask, flash, redirect, render_template, request, session, url_for, jsonify,send_file
 
 from database import authenticate, create_database, get_connection
+from invoice_pdf import generate_invoice_pdf_file
+from payment_service import record_payment
 from services import (
     customer_outstanding,
     generate_invoice_no,
@@ -205,9 +207,11 @@ def labour_web():return table_page("Labour",("ID","Worker","Date","Work","Batch"
 @permission("payments")
 def payments_web():
     if request.method=="POST":
-        from modules.accounts import record_payment
         try:record_payment(request.form["date"],request.form["payment_type"],int(request.form["party_id"]),number("amount",.000001),request.form.get("mode","Cash"),request.form.get("reference",""));flash("Payment saved.","success")
         except (ValueError,PermissionError,KeyError) as e:flash(str(e),"error")
+        except sqlite3.Error:
+            app.logger.exception("Payment transaction failed")
+            flash("Payment could not be saved; no account balances were changed.","error")
         return redirect(url_for("payments_web"))
     with get_connection() as c:parties={"CUSTOMER PAYMENT":c.execute("SELECT id,name FROM customers ORDER BY name").fetchall(),"SUPPLIER PAYMENT":c.execute("SELECT id,name FROM suppliers ORDER BY name").fetchall(),"LABOUR PAYMENT":c.execute("SELECT id,worker_name FROM labour ORDER BY worker_name").fetchall()}
     return table_page("Payments",("ID","Date","Type","Reference","Mode","Outflow","Inflow"),"SELECT id,transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger WHERE source_table IN ('customer_payments','supplier_payments','labour_payments') ORDER BY id DESC",payment_parties=parties,action_resource="payment")
@@ -219,12 +223,15 @@ def ledger_web():
     clauses=[];params=[]
     if start:clauses.append("transaction_date>=?");params.append(start)
     if end:clauses.append("transaction_date<=?");params.append(end)
+    if kind:clauses.append("transaction_type=?");params.append(kind)
+    summary_where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
+    summary_params=list(params)
     if mode=="Cash":clauses.append("LOWER(payment_mode)='cash'")
     elif mode=="Bank":clauses.append("LOWER(payment_mode) IN ('bank','upi','online')")
-    if kind:clauses.append("transaction_type=?");params.append(kind)
     where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
     with get_connection() as c:
         rows=c.execute("SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger"+where+" ORDER BY transaction_date DESC,id DESC",params).fetchall()
+        summary_rows=c.execute("SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger"+summary_where,summary_params).fetchall()
         types=[r[0] for r in c.execute("SELECT DISTINCT transaction_type FROM cash_ledger WHERE COALESCE(transaction_type,'')<>'' ORDER BY transaction_type")]
         opening_cash=float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_cash'),'0')").fetchone()[0] or 0)
         opening_bank=float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_bank'),'0')").fetchone()[0] or 0)
@@ -233,7 +240,7 @@ def ledger_web():
             prior_cash=c.execute("SELECT COALESCE(SUM(credit-debit),0) FROM cash_ledger WHERE transaction_date<? AND LOWER(payment_mode)='cash'",(start,)).fetchone()[0]
             prior_bank=c.execute("SELECT COALESCE(SUM(credit-debit),0) FROM cash_ledger WHERE transaction_date<? AND LOWER(payment_mode) IN ('bank','upi','online')",(start,)).fetchone()[0]
     def totals(which,opening):
-        selected=[r for r in rows if which=="All" or (which=="Cash" and str(r[3]).lower()=="cash") or (which=="Bank" and str(r[3]).lower() in ("bank","upi","online"))]
+        selected=[r for r in summary_rows if which=="All" or (which=="Cash" and str(r[3]).lower()=="cash") or (which=="Bank" and str(r[3]).lower() in ("bank","upi","online"))]
         outflow=sum(float(r[4] or 0) for r in selected);inflow=sum(float(r[5] or 0) for r in selected)
         return {"opening":opening,"inflow":inflow,"outflow":outflow,"closing":opening+inflow-outflow}
     cash=totals("Cash",opening_cash+prior_cash);bank=totals("Bank",opening_bank+prior_bank)
@@ -290,11 +297,13 @@ def backup_web():return render_template("module_web.html",title="Backup / Restor
 @app.route("/api/payments/<kind>",methods=["POST"])
 @permission("payments.create")
 def payment_api(kind):
-    from modules.accounts import record_payment
     kinds={"customer":"CUSTOMER PAYMENT","supplier":"SUPPLIER PAYMENT","labour":"LABOUR PAYMENT"}
     if kind not in kinds:return jsonify(error="Unknown payment type"),404
     try:return jsonify(ok=True,ledger_id=record_payment(request.form.get("date",""),kinds[kind],int(request.form.get("party_id","")),number("amount",.000001),request.form.get("mode","Cash"),request.form.get("reference",""),request.form.get("notes",""))),201
     except (ValueError,PermissionError) as e:return jsonify(error=str(e)),400
+    except sqlite3.Error:
+        app.logger.exception("Payment API transaction failed")
+        return jsonify(error="Payment could not be saved; no account balances were changed."),503
 
 @app.route("/api/reports")
 @permission("reports")
@@ -312,11 +321,10 @@ def chart_download():
 @app.route("/invoice/<int:sale_id>.pdf")
 @permission("sales.create")
 def invoice_download(sale_id):
-    from modules.sales import generate_invoice_pdf_file
     try:
         output=io.BytesIO();generate_invoice_pdf_file(sale_id,output);output.seek(0)
     except ValueError:return jsonify(error="Invoice not found"),404
-    except (ImportError,OSError,RuntimeError):
+    except Exception:
         app.logger.exception("Invoice PDF generation failed for sale %s",sale_id)
         return jsonify(error="Invoice PDF is temporarily unavailable"),503
     return send_file(output,mimetype="application/pdf",download_name=f"invoice-{sale_id}.pdf",as_attachment=request.args.get("download")=="1")

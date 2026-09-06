@@ -12,7 +12,7 @@ class AppTests(unittest.TestCase):
         database.DB_FOLDER = cls.temp.name
         database.DB_FILE = os.path.join(cls.temp.name, "test.db")
         database.create_database()
-        from modules.accounts import record_payment
+        from payment_service import record_payment
         from modules.sales import SalesPage
         import services
         cls.record_payment, cls.SalesPage, cls.services = staticmethod(record_payment), SalesPage, services
@@ -190,7 +190,7 @@ class AppTests(unittest.TestCase):
         finally:self.services.set_desktop_role("ADMIN")
 
     def test_pdf_and_chart_execution(self):
-        from modules.sales import generate_invoice_pdf_file
+        from invoice_pdf import generate_invoice_pdf_file
         from modules.analytics import generate_chart_file
         customer,_,_=self.seed()
         with database.get_connection() as c:bid=c.execute("SELECT id FROM batches WHERE batch_no='B001'").fetchone()[0];sid=c.execute("INSERT INTO sales(invoice_no,sale_date,customer_id,batch_id,batch_no,quantity_kg,rate_per_kg,total_amount) VALUES('PDF1','2026-09-04',?,?,?,?,100,100)",(customer,bid,'B001',1)).lastrowid
@@ -236,6 +236,16 @@ class AppTests(unittest.TestCase):
         seen=[]
         def callback(event):seen.append(event)
         subscribe(callback);publish("sale_changed");unsubscribe(callback);self.assertEqual(seen,["sale_changed"])
+
+    def test_failing_event_subscriber_cannot_misreport_committed_payment(self):
+        from events import subscribe,unsubscribe
+        customer,_,_=self.seed()
+        def broken(_event):raise RuntimeError("UI refresh failed")
+        subscribe(broken)
+        try:ledger=self.record_payment("2026-09-06","CUSTOMER PAYMENT",customer,10,"Bank","EVENT-R1")
+        finally:unsubscribe(broken)
+        self.assertIsNotNone(ledger);self.assertEqual(self.services.customer_outstanding(customer),40)
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE reference='EVENT-R1'").fetchone()[0],1)
 
     def test_edit_delete_reversal_stress(self):
         from modules.accounts import record_payment,update_payment,delete_payment
@@ -420,19 +430,79 @@ class AppTests(unittest.TestCase):
             with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE id=?",(ledger,)).fetchone()[0],1)
             post(f"/manage/payment/{ledger}/delete");self.assertEqual(due(party),before)
 
+    def test_payment_edit_uses_party_id_and_credit_update_rolls_back(self):
+        from payment_service import record_payment,update_payment
+        from web_crud import definition,existing
+        self.services.set_desktop_role("ADMIN")
+        with database.get_connection() as c:
+            c.execute("INSERT INTO customers(name,opening_due) VALUES('Offset Customer',1)")
+            customer=c.execute("INSERT INTO customers(name,opening_due) VALUES('Actual Customer',100)").lastrowid
+        ledger=record_payment("2026-09-06","CUSTOMER PAYMENT",customer,25,"Bank","PARTY-ID")
+        values=existing("payment",ledger,definition("payment"))
+        self.assertEqual(values["party"],f"CUSTOMER PAYMENT|{customer}")
+        with self.assertRaises(ValueError):
+            update_payment(ledger,"2026-09-06","CUSTOMER PAYMENT",customer,20,"Credit","PARTY-ID")
+        self.assertEqual(self.services.customer_outstanding(customer),75)
+        with database.get_connection() as c:
+            self.assertEqual(c.execute("SELECT amount,payment_mode FROM customer_payments WHERE customer_id=?",(customer,)).fetchone(),(25.0,"Bank"))
+            self.assertEqual(c.execute("SELECT credit,payment_mode FROM cash_ledger WHERE id=?",(ledger,)).fetchone(),(25.0,"Bank"))
+
+    def test_desktop_manual_payment_types_remain_supported(self):
+        from payment_service import delete_payment,record_payment,update_payment
+        self.services.set_desktop_role("ADMIN")
+        ledger=record_payment("2026-09-06","OTHER INCOME",None,40,"Cash","OTHER-I")
+        self.assertEqual(self.services.cash_balance("Cash"),40)
+        update_payment(ledger,"2026-09-06","OTHER PAYMENT",None,15,"Cash","OTHER-O")
+        self.assertEqual(self.services.cash_balance("Cash"),-15)
+        delete_payment(ledger)
+        self.assertEqual(self.services.cash_balance("Cash"),0)
+
     def test_live_payment_and_invoice_pdf_regression(self):
         import web_app
         self.services.set_desktop_role("ADMIN");client=web_app.app.test_client()
         with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="live-regression"
         with database.get_connection() as c:
-            customer=c.execute("INSERT INTO customers(name,mobile,address) VALUES('Pinku','9999999999','West Bengal')").lastrowid
+            customer=c.execute("INSERT INTO customers(name,mobile,address,opening_due) VALUES('DEMO CUSTOMER','9999999999','West Bengal',1000)").lastrowid
             batch=c.execute("INSERT INTO batches(batch_no,production_date) VALUES('LIVE-PDF','2026-09-06')").lastrowid
             c.execute("INSERT INTO harvests(harvest_date,batch_no,batch_id,quantity_kg,wastage_kg) VALUES('2026-09-06','LIVE-PDF',?,10,0)",(batch,))
         sale=self.services.save_sale({"invoice_no":"INV-LIVE-1","sale_date":"2026-09-06","customer_id":customer,"batch_id":batch,"quantity_kg":5,"rate_per_kg":400,"discount":0,"paid_amount":800,"payment_mode":"Cash"})
-        response=client.post("/manage/payment/new",data={"csrf_token":"live-regression","payment_date":"2026-09-06","party":f"CUSTOMER PAYMENT|{customer}","amount":"1200","payment_mode":"Cash","reference":"0","notes":"balance"})
-        self.assertEqual(response.status_code,302);self.assertEqual(self.services.customer_outstanding(customer),0)
+        due_before=self.services.customer_outstanding(customer);bank_before=self.services.cash_balance("Bank")
+        receipt={"csrf_token":"live-regression","payment_date":"2026-09-06","party":f"CUSTOMER PAYMENT|{customer}","amount":"500","payment_mode":"Bank","reference":"DEMO-RCPT-001","notes":""}
+        response=client.post("/manage/payment/new",data=receipt)
+        self.assertEqual(response.status_code,302);self.assertEqual(self.services.customer_outstanding(customer),due_before-500);self.assertEqual(self.services.cash_balance("Bank"),bank_before+500)
+        duplicate=client.post("/manage/payment/new",data=receipt)
+        self.assertNotEqual(duplicate.status_code,500);self.assertEqual(self.services.customer_outstanding(customer),due_before-500)
+        partial=dict(receipt,reference="DEMO-PARTIAL",payment_mode="Credit")
+        failed=client.post("/manage/payment/new",data=partial)
+        self.assertNotEqual(failed.status_code,500);self.assertEqual(self.services.customer_outstanding(customer),due_before-500)
         pdf=client.get(f"/invoice/{sale}.pdf");self.assertEqual(pdf.status_code,200);self.assertEqual(pdf.mimetype,"application/pdf");self.assertTrue(pdf.data.startswith(b"%PDF"));self.assertGreater(len(pdf.data),500)
-        with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_table='customer_payments' AND reference='0'").fetchone()[0],1)
+        from unittest import mock
+        with mock.patch("web_app.generate_invoice_pdf_file",side_effect=TypeError("broken PDF data")):
+            unavailable=client.get(f"/invoice/{sale}.pdf")
+        self.assertEqual(unavailable.status_code,503)
+        with database.get_connection() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM customer_payments WHERE reference_no='DEMO-RCPT-001'").fetchone()[0],1)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_table='customer_payments' AND reference='DEMO-RCPT-001'").fetchone()[0],1)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM customer_payments WHERE reference_no='DEMO-PARTIAL'").fetchone()[0],0)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE reference='DEMO-PARTIAL'").fetchone()[0],0)
+
+    def test_web_runtime_imports_do_not_require_tkinter(self):
+        import subprocess,sys
+        script="""import builtins
+real_import=builtins.__import__
+def no_tk(name,*args,**kwargs):
+    if name=='tkinter' or name.startswith('tkinter.'):
+        raise ImportError('tkinter is unavailable on Render')
+    return real_import(name,*args,**kwargs)
+builtins.__import__=no_tk
+import web_app
+from invoice_pdf import generate_invoice_pdf_file
+from payment_service import record_payment
+print('web-safe')
+"""
+        env=os.environ.copy();env["MUSHROOM_DATA_DIR"]=self.temp.name
+        result=subprocess.run([sys.executable,"-c",script],cwd=os.path.dirname(__file__),env=env,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr);self.assertIn("web-safe",result.stdout)
 
     def test_split_purchase_cash_bank_and_ledger_summary(self):
         import web_app
@@ -450,7 +520,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(purchase[2:],(3400.0,3400.0,0.0));self.assertEqual([(r[1],r[2]) for r in rows],[('Bank',1000.0),('Cash',2400.0)]);self.assertEqual(self.services.raw_material_stock(purchase[1]),1)
         self.assertEqual(submit(f"/manage/purchase/{purchase[0]}/edit","2000","1400","2").status_code,302)
         with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_id=? AND source_table LIKE 'purchases_%'",(purchase[0],)).fetchone()[0],2)
-        ledger=client.get("/cash-bank?mode=Cash&start=2026-09-06&end=2026-09-06");self.assertEqual(ledger.status_code,200);body=ledger.get_data(as_text=True);self.assertIn("Opening:",body);self.assertIn("Closing:",body);self.assertIn("Account",body)
+        ledger=client.get("/cash-bank?mode=Cash&start=2026-09-06&end=2026-09-06");self.assertEqual(ledger.status_code,200);body=ledger.get_data(as_text=True)
+        for label in ("Total Cash Inflow","Total Cash Outflow","Cash Balance","Total Bank Inflow","Total Bank Outflow","Bank Balance","Total Inflow","Total Outflow","Net Balance","Account"):self.assertIn(label,body)
         deleted=client.post(f"/manage/purchase/{purchase[0]}/delete",data={"csrf_token":"split-token"});self.assertEqual(deleted.status_code,302);self.assertEqual(self.services.raw_material_stock(purchase[1]),0)
         with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_id=? AND source_table LIKE 'purchases_%'",(purchase[0],)).fetchone()[0],0)
 
