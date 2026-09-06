@@ -357,6 +357,8 @@ def create_database():
     _add_column(cursor, "labour", "batch_id INTEGER")
     _add_column(cursor, "purchases", "batch_id INTEGER")
     _add_column(cursor, "purchases", "material_id INTEGER")
+    _add_column(cursor, "purchases", "cash_paid REAL DEFAULT 0")
+    _add_column(cursor, "purchases", "bank_paid REAL DEFAULT 0")
     _add_column(cursor, "material_usage", "batch_id INTEGER")
     _add_column(cursor, "batches", "straw_type TEXT")
     _add_column(cursor, "batches", "bag_size REAL DEFAULT 0")
@@ -372,6 +374,10 @@ def create_database():
             WHERE b.batch_no={table}.batch_no) WHERE batch_id IS NULL AND COALESCE(batch_no,'')!=''""")
     cursor.execute("""UPDATE purchases SET material_id=(SELECT id FROM raw_materials r
         WHERE r.item=purchases.item) WHERE material_id IS NULL""")
+    cursor.execute("""UPDATE purchases SET cash_paid=paid_amount
+        WHERE COALESCE(cash_paid,0)=0 AND COALESCE(bank_paid,0)=0 AND LOWER(COALESCE(payment_mode,''))='cash'""")
+    cursor.execute("""UPDATE purchases SET bank_paid=paid_amount
+        WHERE COALESCE(cash_paid,0)=0 AND COALESCE(bank_paid,0)=0 AND LOWER(COALESCE(payment_mode,'')) IN ('bank','upi','online')""")
 
     defaults = {
         "business_name": "Oyster Mushroom Business",

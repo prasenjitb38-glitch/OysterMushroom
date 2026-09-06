@@ -420,6 +420,40 @@ class AppTests(unittest.TestCase):
             with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE id=?",(ledger,)).fetchone()[0],1)
             post(f"/manage/payment/{ledger}/delete");self.assertEqual(due(party),before)
 
+    def test_live_payment_and_invoice_pdf_regression(self):
+        import web_app
+        self.services.set_desktop_role("ADMIN");client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="live-regression"
+        with database.get_connection() as c:
+            customer=c.execute("INSERT INTO customers(name,mobile,address) VALUES('Pinku','9999999999','West Bengal')").lastrowid
+            batch=c.execute("INSERT INTO batches(batch_no,production_date) VALUES('LIVE-PDF','2026-09-06')").lastrowid
+            c.execute("INSERT INTO harvests(harvest_date,batch_no,batch_id,quantity_kg,wastage_kg) VALUES('2026-09-06','LIVE-PDF',?,10,0)",(batch,))
+        sale=self.services.save_sale({"invoice_no":"INV-LIVE-1","sale_date":"2026-09-06","customer_id":customer,"batch_id":batch,"quantity_kg":5,"rate_per_kg":400,"discount":0,"paid_amount":800,"payment_mode":"Cash"})
+        response=client.post("/manage/payment/new",data={"csrf_token":"live-regression","payment_date":"2026-09-06","party":f"CUSTOMER PAYMENT|{customer}","amount":"1200","payment_mode":"Cash","reference":"0","notes":"balance"})
+        self.assertEqual(response.status_code,302);self.assertEqual(self.services.customer_outstanding(customer),0)
+        pdf=client.get(f"/invoice/{sale}.pdf");self.assertEqual(pdf.status_code,200);self.assertEqual(pdf.mimetype,"application/pdf");self.assertTrue(pdf.data.startswith(b"%PDF"));self.assertGreater(len(pdf.data),500)
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_table='customer_payments' AND reference='0'").fetchone()[0],1)
+
+    def test_split_purchase_cash_bank_and_ledger_summary(self):
+        import web_app
+        self.services.set_desktop_role("ADMIN");client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="split-token"
+        with database.get_connection() as c:
+            supplier=c.execute("INSERT INTO suppliers(name) VALUES('Split Cash')").lastrowid
+            other=c.execute("SELECT id FROM raw_materials WHERE LOWER(TRIM(item))='other'").fetchone()[0]
+            c.execute("DELETE FROM raw_materials WHERE LOWER(TRIM(item))='split fogger'")
+        def submit(path,cash,bank,quantity="1"):
+            return client.post(path,data={"csrf_token":"split-token","purchase_date":"2026-09-06","purchase_invoice":"SPLIT-1","supplier_id":supplier,"material_id":other,"material_name":"Split Fogger","batch_no":"","quantity":quantity,"unit":"Piece","rate":"3400","cash_paid":cash,"bank_paid":bank,"notes":"split"})
+        self.assertEqual(submit("/manage/purchase/new","2400","1000").status_code,302)
+        with database.get_connection() as c:
+            purchase=c.execute("SELECT id,material_id,total_amount,paid_amount,due_amount FROM purchases WHERE purchase_invoice='SPLIT-1'").fetchone();rows=c.execute("SELECT source_table,payment_mode,debit FROM cash_ledger WHERE source_id=? AND source_table LIKE 'purchases_%' ORDER BY source_table",(purchase[0],)).fetchall()
+        self.assertEqual(purchase[2:],(3400.0,3400.0,0.0));self.assertEqual([(r[1],r[2]) for r in rows],[('Bank',1000.0),('Cash',2400.0)]);self.assertEqual(self.services.raw_material_stock(purchase[1]),1)
+        self.assertEqual(submit(f"/manage/purchase/{purchase[0]}/edit","2000","1400","2").status_code,302)
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_id=? AND source_table LIKE 'purchases_%'",(purchase[0],)).fetchone()[0],2)
+        ledger=client.get("/cash-bank?mode=Cash&start=2026-09-06&end=2026-09-06");self.assertEqual(ledger.status_code,200);body=ledger.get_data(as_text=True);self.assertIn("Opening:",body);self.assertIn("Closing:",body);self.assertIn("Account",body)
+        deleted=client.post(f"/manage/purchase/{purchase[0]}/delete",data={"csrf_token":"split-token"});self.assertEqual(deleted.status_code,302);self.assertEqual(self.services.raw_material_stock(purchase[1]),0)
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_id=? AND source_table LIKE 'purchases_%'",(purchase[0],)).fetchone()[0],0)
+
     def test_sqlite_concurrent_writers(self):
         from concurrent.futures import ThreadPoolExecutor
         self.services.set_desktop_role("ADMIN")

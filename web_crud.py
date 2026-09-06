@@ -1,5 +1,5 @@
 import sqlite3
-from flask import Blueprint,flash,redirect,render_template,request,session,url_for
+from flask import Blueprint,current_app,flash,redirect,render_template,request,session,url_for
 
 from database import get_connection,hash_password,set_user_active,validate_password
 from services import require_permission
@@ -41,7 +41,7 @@ def definition(resource):
     base={
       "supplier":[("name","Name","text",None),("mobile","Mobile","text",None),("email","Email","email",None),("address","Address","text",None),("opening_due","Opening Due","number",None),("notes","Notes","text",None)],
       "customer":[("name","Name","text",None),("mobile","Mobile","text",None),("email","Email","email",None),("address","Address","text",None),("opening_due","Opening Balance","number",None),("notes","Notes","text",None)],
-      "purchase":[("purchase_date","Date","date",None),("purchase_invoice","Invoice No","text",None)]+choices["purchase"]+[("quantity","Quantity","number",None),("unit","Unit","select",[(x,x) for x in ("Kg","Gram","Bag","Pcs","Piece","Litre")]),("rate","Rate","number",None),("paid_amount","Paid","number",None),("payment_mode","Payment Mode","select",[(x,x) for x in ("Cash","Bank","UPI","Credit","Other")]),("notes","Notes","text",None)],
+      "purchase":[("purchase_date","Date","date",None),("purchase_invoice","Invoice No","text",None)]+choices["purchase"]+[("quantity","Quantity","number",None),("unit","Unit","select",[(x,x) for x in ("Kg","Gram","Bag","Pcs","Piece","Litre")]),("rate","Rate","number",None),("cash_paid","Cash Paid","number",None),("bank_paid","Bank / Online Paid","number",None),("notes","Notes","text",None)],
       "expense":[("expense_date","Date","date",None),("category","Category","text",None),("description","Description","text",None),("amount","Amount","number",None),("payment_mode","Payment Mode","select",[(x,x) for x in ("Cash","Bank","UPI","Other")]),("batch_no","Batch No","text",None),("notes","Notes","text",None)],
       "labour":[("worker_name","Worker","text",None),("work_date","Date","date",None),("work_type","Work Type","text",None),("batch_no","Batch No","text",None),("days","Days","number",None),("hours","Hours","number",None),("rate","Rate","number",None),("paid","Paid","number",None),("payment_mode","Payment Mode","select",[(x,x) for x in ("Cash","Bank","UPI","Other")]),("notes","Notes","text",None)],
       "batch":[("batch_no","Batch No","text",None),("production_date","Start Date","date",None),("straw_type","Straw Type","text",None),("straw_qty","Straw Kg","number",None),("spawn_qty","Spawn Kg","number",None),("bag_count","Bags","number",None),("bag_size","Bag Size Kg","number",None),("expected_yield","Expected Yield Kg","number",None),("expected_harvest_date","Expected Harvest","date",None),("room_rack","Room / Rack","text",None),("status","Status","select",[(x,x) for x in ("Preparing","Growing","Harvesting","Completed","Failed")]),("notes","Notes","text",None)],
@@ -87,7 +87,10 @@ def form_data(fields):
 def save(resource,data,record_id):
     from services import save_party,save_purchase,save_expense,save_labour,save_batch,save_production,save_harvest,save_sale,save_material,save_material_usage,save_material_adjustment,save_stock_adjustment,generate_invoice_no
     if resource in ("supplier","customer"):return save_party(resource,data,record_id)
-    if resource=="purchase":return save_purchase(data,record_id)
+    if resource=="purchase":
+        if "cash_paid" not in request.form and "bank_paid" not in request.form:
+            data.pop("cash_paid",None);data.pop("bank_paid",None);data["paid_amount"]=float(request.form.get("paid_amount",0) or 0);data["payment_mode"]=request.form.get("payment_mode","Cash")
+        return save_purchase(data,record_id)
     if resource=="expense":return save_expense(data,record_id)
     if resource=="labour":return save_labour(data,record_id)
     if resource=="batch":return save_batch(data,record_id)
@@ -140,7 +143,9 @@ def resource_form(resource,record_id=None):
         values=existing(resource,record_id,fields)
         if request.method=="POST":
             save(resource,form_data(fields),record_id);flash("Record saved.","success");return redirect(url_for(LIST_ENDPOINT[resource]))
-    except (ValueError,OverflowError,sqlite3.Error,KeyError,TypeError) as error:flash(str(error),"error")
+    except (ValueError,OverflowError,sqlite3.Error,KeyError,TypeError,PermissionError) as error:flash(str(error),"error")
+    except Exception:
+        current_app.logger.exception("Unexpected %s form failure",resource);flash("The record could not be saved. Please verify the form and try again.","error")
     return render_template("crud_form.html",title=("Edit " if record_id else "+ New ")+resource.replace("_"," ").title(),resource=resource,fields=fields,values=values,record_id=record_id)
 
 @crud.route("/<resource>/<int:record_id>/delete",methods=["POST"])

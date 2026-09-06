@@ -26,7 +26,7 @@ function material(){
   if(!other){n.value='';if(u&&selected.dataset.unit)u.value=selected.dataset.unit}
 }
 function calc(){
-  const q=Number(f.elements.quantity?.value||0),r=Number(f.elements.rate?.value||0),p=Number(f.elements.paid_amount?.value||0),t=q*r;
+  const q=Number(f.elements.quantity?.value||0),r=Number(f.elements.rate?.value||0),p=f.elements.paid_amount?Number(f.elements.paid_amount.value||0):Number(f.elements.cash_paid?.value||0)+Number(f.elements.bank_paid?.value||0),t=q*r;
   const box=document.getElementById('calculated-total'),due=document.getElementById('calculated-due');
   if(f.elements.quantity&&f.elements.rate){box.textContent=`Total: ${t.toFixed(2)}`;due.textContent=` Due: ${(t-p).toFixed(2)}`}
 }

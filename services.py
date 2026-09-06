@@ -269,7 +269,9 @@ def save_expense(data, record_id=None):
 def save_purchase(data, record_id=None):
     enforce_desktop("purchases.edit" if record_id else "purchases.create")
     with get_connection() as conn:
-        qty=float(data["quantity"]);rate=float(data["rate"]);paid=float(data.get("paid_amount",0));total=qty*rate
+        qty=float(data["quantity"]);rate=float(data["rate"]);total=qty*rate
+        split="cash_paid" in data or "bank_paid" in data
+        cash_paid=float(data.get("cash_paid",0));bank_paid=float(data.get("bank_paid",0));paid=cash_paid+bank_paid if split else float(data.get("paid_amount",0))
         if qty<=0 or rate<0 or paid<0 or paid>total:raise ValueError("Invalid purchase")
         material_id=data.get("material_id")
         material=conn.execute("SELECT item,unit FROM raw_materials WHERE id=?",(material_id,)).fetchone()
@@ -285,10 +287,16 @@ def save_purchase(data, record_id=None):
                 material_unit=(data.get("unit") or "Kg").strip() or "Kg"
                 material_id=conn.execute("INSERT INTO raw_materials(item,unit,opening_stock,reorder_level) VALUES(?,?,0,0)",(custom_name,material_unit)).lastrowid;material_name=custom_name
             material=(material_name,material_unit)
-        vals=(data["purchase_date"],data.get("purchase_invoice",""),data.get("supplier_id"),material[0],material_id,qty,material[1],rate,total,paid,total-paid,data.get("batch_no",""),data.get("payment_mode","Cash"),data.get("notes",""))
-        if record_id:conn.execute("UPDATE purchases SET purchase_date=?,purchase_invoice=?,supplier_id=?,item=?,material_id=?,quantity=?,unit=?,rate=?,total_amount=?,paid_amount=?,due_amount=?,batch_no=?,payment_mode=?,notes=? WHERE id=?",vals+(record_id,))
-        else:record_id=conn.execute("INSERT INTO purchases(purchase_date,purchase_invoice,supplier_id,item,material_id,quantity,unit,rate,total_amount,paid_amount,due_amount,batch_no,payment_mode,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",vals).lastrowid
-        post_ledger(conn,"purchases",record_id,data["purchase_date"],"PURCHASE PAYMENT",data.get("payment_mode","Cash"),paid,False,data.get("purchase_invoice",""),data.get("notes",""));publish("purchase_changed");return record_id
+        mode=("Split" if cash_paid and bank_paid else ("Cash" if cash_paid else "Bank")) if split else data.get("payment_mode","Cash")
+        vals=(data["purchase_date"],data.get("purchase_invoice",""),data.get("supplier_id"),material[0],material_id,qty,material[1],rate,total,paid,cash_paid if split else (paid if str(mode).lower()=="cash" else 0),bank_paid if split else (paid if str(mode).lower() in ("bank","upi","online") else 0),total-paid,data.get("batch_no",""),mode,data.get("notes",""))
+        if record_id:conn.execute("UPDATE purchases SET purchase_date=?,purchase_invoice=?,supplier_id=?,item=?,material_id=?,quantity=?,unit=?,rate=?,total_amount=?,paid_amount=?,cash_paid=?,bank_paid=?,due_amount=?,batch_no=?,payment_mode=?,notes=? WHERE id=?",vals+(record_id,))
+        else:record_id=conn.execute("INSERT INTO purchases(purchase_date,purchase_invoice,supplier_id,item,material_id,quantity,unit,rate,total_amount,paid_amount,cash_paid,bank_paid,due_amount,batch_no,payment_mode,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",vals).lastrowid
+        conn.execute("DELETE FROM cash_ledger WHERE source_id=? AND source_table IN ('purchases','purchases_cash','purchases_bank')",(record_id,))
+        if split:
+            post_ledger(conn,"purchases_cash",record_id,data["purchase_date"],"PURCHASE PAYMENT", "Cash",cash_paid,False,data.get("purchase_invoice",""),data.get("notes",""))
+            post_ledger(conn,"purchases_bank",record_id,data["purchase_date"],"PURCHASE PAYMENT", "Bank",bank_paid,False,data.get("purchase_invoice",""),data.get("notes",""))
+        else:post_ledger(conn,"purchases",record_id,data["purchase_date"],"PURCHASE PAYMENT",mode,paid,False,data.get("purchase_invoice",""),data.get("notes",""))
+        publish("purchase_changed");return record_id
 
 def save_labour(data, record_id=None):
     enforce_desktop("labour.edit" if record_id else "labour.create")
@@ -304,7 +312,9 @@ def delete_source_record(table,record_id):
     enforce_desktop(f"{table}.delete")
     if table not in ("sales","expenses","purchases","labour"):raise ValueError("Unsupported source")
     with get_connection() as conn:
-        conn.execute("DELETE FROM cash_ledger WHERE source_table=? AND source_id=?",(table,record_id));result=conn.execute(f"DELETE FROM {table} WHERE id=?",(record_id,)).rowcount>0
+        if table=="purchases":conn.execute("DELETE FROM cash_ledger WHERE source_id=? AND source_table IN ('purchases','purchases_cash','purchases_bank')",(record_id,))
+        else:conn.execute("DELETE FROM cash_ledger WHERE source_table=? AND source_id=?",(table,record_id))
+        result=conn.execute(f"DELETE FROM {table} WHERE id=?",(record_id,)).rowcount>0
     publish(table+"_changed");return result
 
 def save_batch(data,batch_id=None):

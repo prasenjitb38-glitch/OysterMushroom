@@ -1,4 +1,4 @@
-import os, secrets, time, tempfile
+import io, os, secrets, time, tempfile
 from functools import wraps
 from flask import Flask, flash, redirect, render_template, request, session, url_for, jsonify,send_file
 
@@ -214,7 +214,31 @@ def payments_web():
 
 @app.route("/cash-bank")
 @permission("ledger")
-def ledger_web():return table_page("Cash / Bank Ledger",("Date","Type","Reference","Mode","Outflow","Inflow"),"SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger ORDER BY id DESC")
+def ledger_web():
+    start=request.args.get("start","").strip();end=request.args.get("end","").strip();mode=request.args.get("mode","All").strip();kind=request.args.get("type","").strip()
+    clauses=[];params=[]
+    if start:clauses.append("transaction_date>=?");params.append(start)
+    if end:clauses.append("transaction_date<=?");params.append(end)
+    if mode=="Cash":clauses.append("LOWER(payment_mode)='cash'")
+    elif mode=="Bank":clauses.append("LOWER(payment_mode) IN ('bank','upi','online')")
+    if kind:clauses.append("transaction_type=?");params.append(kind)
+    where=(" WHERE "+" AND ".join(clauses)) if clauses else ""
+    with get_connection() as c:
+        rows=c.execute("SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger"+where+" ORDER BY transaction_date DESC,id DESC",params).fetchall()
+        types=[r[0] for r in c.execute("SELECT DISTINCT transaction_type FROM cash_ledger WHERE COALESCE(transaction_type,'')<>'' ORDER BY transaction_type")]
+        opening_cash=float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_cash'),'0')").fetchone()[0] or 0)
+        opening_bank=float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_bank'),'0')").fetchone()[0] or 0)
+        prior_cash=prior_bank=0.0
+        if start:
+            prior_cash=c.execute("SELECT COALESCE(SUM(credit-debit),0) FROM cash_ledger WHERE transaction_date<? AND LOWER(payment_mode)='cash'",(start,)).fetchone()[0]
+            prior_bank=c.execute("SELECT COALESCE(SUM(credit-debit),0) FROM cash_ledger WHERE transaction_date<? AND LOWER(payment_mode) IN ('bank','upi','online')",(start,)).fetchone()[0]
+    def totals(which,opening):
+        selected=[r for r in rows if which=="All" or (which=="Cash" and str(r[3]).lower()=="cash") or (which=="Bank" and str(r[3]).lower() in ("bank","upi","online"))]
+        outflow=sum(float(r[4] or 0) for r in selected);inflow=sum(float(r[5] or 0) for r in selected)
+        return {"opening":opening,"inflow":inflow,"outflow":outflow,"closing":opening+inflow-outflow}
+    cash=totals("Cash",opening_cash+prior_cash);bank=totals("Bank",opening_bank+prior_bank)
+    summary={"Cash":cash,"Bank":bank,"Overall":{k:cash[k]+bank[k] for k in cash}}
+    return render_template("module_web.html",title="Cash / Bank Ledger",headers=("Date","Type","Reference","Mode","Outflow","Inflow"),rows=rows,ledger_summary=summary,ledger_types=types)
 
 @app.route("/batch-cost")
 @permission("batch_cost")
@@ -289,9 +313,13 @@ def chart_download():
 @permission("sales.create")
 def invoice_download(sale_id):
     from modules.sales import generate_invoice_pdf_file
-    try:path=os.path.join(tempfile.gettempdir(),f"invoice-{sale_id}-{secrets.token_hex(5)}.pdf");generate_invoice_pdf_file(sale_id,path)
+    try:
+        output=io.BytesIO();generate_invoice_pdf_file(sale_id,output);output.seek(0)
     except ValueError:return jsonify(error="Invoice not found"),404
-    return send_file(path,mimetype="application/pdf",download_name=f"invoice-{sale_id}.pdf",as_attachment=request.args.get("download")=="1")
+    except (ImportError,OSError,RuntimeError):
+        app.logger.exception("Invoice PDF generation failed for sale %s",sale_id)
+        return jsonify(error="Invoice PDF is temporarily unavailable"),503
+    return send_file(output,mimetype="application/pdf",download_name=f"invoice-{sale_id}.pdf",as_attachment=request.args.get("download")=="1")
 
 @app.route("/backup/download")
 @permission("backup_restore")
