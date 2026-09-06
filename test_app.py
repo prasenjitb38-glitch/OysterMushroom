@@ -546,9 +546,32 @@ print('web-safe')
         self.assertEqual(submit(f"/manage/purchase/{purchase[0]}/edit","2000","1400","2").status_code,302)
         with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_id=? AND source_table LIKE 'purchases_%'",(purchase[0],)).fetchone()[0],2)
         ledger=client.get("/cash-bank?mode=Cash&start=2026-09-06&end=2026-09-06");self.assertEqual(ledger.status_code,200);body=ledger.get_data(as_text=True)
-        for label in ("Total Cash Inflow","Total Cash Outflow","Cash Balance","Total Bank Inflow","Total Bank Outflow","Bank Balance","Total Inflow","Total Outflow","Net Balance","Account"):self.assertIn(label,body)
+        for label in ("Cash Summary","Cash Inflow","Cash Outflow","Cash Balance","Bank Summary","Bank Inflow","Bank Outflow","Bank Balance","Overall Summary","Total Inflow","Total Outflow","Net Balance","Account"):self.assertIn(label,body)
         deleted=client.post(f"/manage/purchase/{purchase[0]}/delete",data={"csrf_token":"split-token"});self.assertEqual(deleted.status_code,302);self.assertEqual(self.services.raw_material_stock(purchase[1]),0)
         with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_id=? AND source_table LIKE 'purchases_%'",(purchase[0],)).fetchone()[0],0)
+
+    def test_cash_bank_dashboard_ui_formatting_filters_table_and_breakpoints(self):
+        import web_app
+        self.services.set_desktop_role("ADMIN");client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="ledger-ui-token"
+        with database.get_connection() as c:
+            c.execute("INSERT INTO cash_ledger(transaction_date,transaction_type,reference,payment_mode,debit,credit) VALUES('2026-09-06','UI TEST','CASH-INFLOW','Cash',0,1234567.89)")
+            c.execute("INSERT INTO cash_ledger(transaction_date,transaction_type,reference,payment_mode,debit,credit) VALUES('2026-09-06','UI TEST','BANK-OUTFLOW','Bank',2700,0)")
+        response=client.get("/cash-bank?mode=Bank&type=UI%20TEST&start=2026-09-06&end=2026-09-06")
+        self.assertEqual(response.status_code,200);body=response.get_data(as_text=True)
+        for label in ("Cash Summary","Cash Inflow","Cash Outflow","Cash Balance","Bank Summary","Bank Inflow","Bank Outflow","Bank Balance","Overall Summary","Total Inflow","Total Outflow","Net Balance"):
+            self.assertEqual(body.count(f">{label}<"),1,label)
+        for amount in ("₹1,234,567.89","₹0.00","₹2,700.00","-₹2,700.00","₹1,231,867.89"):
+            self.assertIn(amount,body)
+        self.assertIn('class="summary-amount is-negative">-₹2,700.00',body)
+        self.assertIn('name="start" value="2026-09-06"',body);self.assertIn('name="end" value="2026-09-06"',body)
+        self.assertIn('<option selected>Bank</option>',body);self.assertIn('<option selected>UI TEST</option>',body)
+        for heading in ("Date","Type","Reference","Mode","Outflow","Inflow"):self.assertIn(f"<th>{heading}</th>",body)
+        self.assertIn("BANK-OUTFLOW",body);self.assertNotIn("CASH-INFLOW</td>",body)
+        css_response=client.get("/static/mobile.css");css=css_response.get_data(as_text=True);css_response.close()
+        self.assertIn(".ledger-summary-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))",css)
+        self.assertIn("@media(max-width:900px){.ledger-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}",css)
+        self.assertIn("@media(max-width:600px){.ledger-summary-grid{grid-template-columns:1fr}",css)
 
     def test_sqlite_concurrent_writers(self):
         from concurrent.futures import ThreadPoolExecutor
