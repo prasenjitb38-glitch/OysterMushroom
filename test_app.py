@@ -150,6 +150,41 @@ class AppTests(unittest.TestCase):
         codes=[client.post("/login",data={"csrf_token":"token","username":"locked","password":"bad"}).status_code for _ in range(6)]
         self.assertEqual(codes[-1],429)
 
+    def test_csrf_survives_forced_password_change_and_protects_supplier_form(self):
+        import re
+        import web_app
+
+        def token(response):
+            match=re.search(r'name="csrf_token"\s+value="([^"]+)"',response.get_data(as_text=True))
+            self.assertIsNotNone(match)
+            return match.group(1)
+
+        with database.get_connection() as c:
+            admin=c.execute("SELECT id,password_hash,must_change_password FROM users WHERE username='admin'").fetchone()
+            c.execute("UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?",(database.hash_password("admin"),admin[0]))
+        try:
+            client=web_app.app.test_client()
+            login_token=token(client.get("/login"))
+            login=client.post("/login",data={"csrf_token":login_token,"username":"admin","password":"admin"})
+            self.assertEqual((login.status_code,login.headers["Location"]), (302,"/change-password"))
+
+            password_token=token(client.get("/change-password"))
+            changed=client.post("/change-password",data={"csrf_token":password_token,"current_password":"admin","new_password":"admin123"})
+            self.assertEqual((changed.status_code,changed.headers["Location"]), (302,"/"))
+
+            form_token=token(client.get("/manage/supplier/new"))
+            supplier={"name":"CSRF Flow Supplier","mobile":"9000000001","email":"csrf@example.test","address":"Test","opening_due":"0","notes":""}
+            self.assertEqual(client.post("/manage/supplier/new",data=supplier).status_code,400)
+            self.assertEqual(client.post("/manage/supplier/new",data={**supplier,"csrf_token":"CSRF Flow Supplier"}).status_code,400)
+            saved=client.post("/manage/supplier/new",data={**supplier,"csrf_token":form_token})
+            self.assertEqual((saved.status_code,saved.headers["Location"]),(302,"/suppliers"))
+            with database.get_connection() as c:
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM suppliers WHERE name='CSRF Flow Supplier'").fetchone()[0],1)
+                c.execute("DELETE FROM suppliers WHERE name='CSRF Flow Supplier'")
+        finally:
+            with database.get_connection() as c:
+                c.execute("UPDATE users SET password_hash=?,must_change_password=? WHERE id=?",(admin[1],admin[2],admin[0]))
+
     def test_production_edit_delete_never_changes_stock_and_yield(self):
         with database.get_connection() as c:bid=c.execute("INSERT INTO batches(batch_no,production_date,bag_count,expected_yield) VALUES('P1','2026-09-01',10,20)").lastrowid;c.execute("INSERT INTO harvests(harvest_date,batch_no,batch_id,quantity_kg,wastage_kg) VALUES('2026-09-02','P1',?,11,1)",(bid,))
         before=self.services.mushroom_stock();pid=self.services.save_production({"production_date":"2026-09-02","batch_id":bid,"bags":10,"production_kg":8,"wastage_kg":1})
