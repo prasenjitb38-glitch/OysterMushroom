@@ -1,10 +1,21 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:oyster_mushroom_manager/download_service.dart';
 import 'package:oyster_mushroom_manager/navigation_policy.dart';
+
+class _StreamClient extends http.BaseClient {
+  _StreamClient(this.handler);
+
+  final Future<http.StreamedResponse> Function(http.BaseRequest) handler;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      handler(request);
+}
 
 void main() {
   group('safeDownloadFileName', () {
@@ -74,6 +85,7 @@ void main() {
         );
 
         expect(response.statusCode, 200);
+        expect(await response.stream.bytesToString(), 'pdf');
         expect(requests.map((request) => request.url.path), [
           '/start',
           '/file.pdf',
@@ -120,6 +132,158 @@ void main() {
           ),
         ),
       );
+    });
+
+    test('rejects redirects with no location', () async {
+      final client = MockClient((_) async => http.Response('', 302));
+
+      await expectLater(
+        fetchTrustedDownload(client, Uri.parse('$appBaseUrl/start')),
+        throwsA(
+          isA<HttpException>().having(
+            (error) => error.message,
+            'message',
+            contains('no destination'),
+          ),
+        ),
+      );
+    });
+
+    test('enforces the redirect limit', () async {
+      var requests = 0;
+      final client = MockClient((request) async {
+        requests++;
+        return http.Response(
+          '',
+          302,
+          headers: {'location': '/redirect-$requests'},
+        );
+      });
+
+      await expectLater(
+        fetchTrustedDownload(
+          client,
+          Uri.parse('$appBaseUrl/start'),
+          maxRedirects: 1,
+        ),
+        throwsA(
+          isA<HttpException>().having(
+            (error) => error.message,
+            'message',
+            contains('Too many'),
+          ),
+        ),
+      );
+      expect(requests, 2);
+    });
+  });
+
+  group('saveTrustedDownload', () {
+    late Directory directory;
+
+    setUp(() async {
+      directory = await Directory.systemTemp.createTemp(
+        'oyster_stream_download_',
+      );
+    });
+
+    tearDown(() async {
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    test('streams a nonempty response into the selected file', () async {
+      final client = _StreamClient(
+        (request) async => http.StreamedResponse(
+          Stream.fromIterable([
+            Uint8List.fromList([1, 2]),
+            Uint8List.fromList([3, 4]),
+          ]),
+          200,
+          request: request,
+          headers: {
+            'content-disposition': 'attachment; filename="invoice.pdf"',
+          },
+        ),
+      );
+
+      final file = await saveTrustedDownload(
+        client,
+        Uri.parse('$appBaseUrl/download'),
+        directory,
+      );
+
+      expect(file.path, endsWith('invoice.pdf'));
+      expect(await file.readAsBytes(), [1, 2, 3, 4]);
+    });
+
+    test('rejects non-2xx responses without creating a file', () async {
+      final client = MockClient((_) async => http.Response('denied', 403));
+
+      await expectLater(
+        saveTrustedDownload(
+          client,
+          Uri.parse('$appBaseUrl/download'),
+          directory,
+        ),
+        throwsA(
+          isA<HttpException>().having(
+            (error) => error.message,
+            'message',
+            contains('403'),
+          ),
+        ),
+      );
+      expect(directory.listSync(), isEmpty);
+    });
+
+    test('rejects an empty body and removes the output file', () async {
+      final client = MockClient((_) async => http.Response('', 200));
+
+      await expectLater(
+        saveTrustedDownload(
+          client,
+          Uri.parse('$appBaseUrl/empty.pdf'),
+          directory,
+        ),
+        throwsA(
+          isA<HttpException>().having(
+            (error) => error.message,
+            'message',
+            contains('empty'),
+          ),
+        ),
+      );
+      expect(directory.listSync(), isEmpty);
+    });
+
+    test('removes a partial file when the response stream fails', () async {
+      Stream<List<int>> failingStream() async* {
+        yield [1, 2, 3];
+        throw StateError('connection lost');
+      }
+
+      final client = _StreamClient(
+        (request) async => http.StreamedResponse(
+          failingStream(),
+          200,
+          request: request,
+          headers: {
+            'content-disposition': 'attachment; filename="partial.pdf"',
+          },
+        ),
+      );
+
+      await expectLater(
+        saveTrustedDownload(
+          client,
+          Uri.parse('$appBaseUrl/download'),
+          directory,
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(directory.listSync(), isEmpty);
     });
   });
 

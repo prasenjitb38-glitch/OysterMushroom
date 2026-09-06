@@ -44,4 +44,52 @@ void main() {
       expect(isExternalWebUrl(Uri.parse('javascript:alert(1)')), isFalse);
     });
   });
+
+  group('external app launching', () {
+    test('allows user-initiated main-frame and new-window actions', () {
+      expect(
+        canLaunchExternalNavigation(
+          isMainFrame: true,
+          isNewWindow: false,
+          isUserInitiated: true,
+        ),
+        isTrue,
+      );
+      expect(
+        canLaunchExternalNavigation(
+          isMainFrame: false,
+          isNewWindow: true,
+          isUserInitiated: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('blocks iframe and script-driven external launches', () {
+      expect(
+        canLaunchExternalNavigation(
+          isMainFrame: false,
+          isNewWindow: false,
+          isUserInitiated: true,
+        ),
+        isFalse,
+      );
+      expect(
+        canLaunchExternalNavigation(
+          isMainFrame: true,
+          isNewWindow: false,
+          isUserInitiated: false,
+        ),
+        isFalse,
+      );
+      expect(
+        canLaunchExternalNavigation(
+          isMainFrame: false,
+          isNewWindow: true,
+          isUserInitiated: false,
+        ),
+        isFalse,
+      );
+    });
+  });
 }

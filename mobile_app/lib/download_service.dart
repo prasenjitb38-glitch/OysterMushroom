@@ -29,34 +29,21 @@ class DownloadService {
     final cookieHeader = cookies
         .map((cookie) => '${cookie.name}=${cookie.value}')
         .join('; ');
-    final response = await fetchTrustedDownload(
-      _client,
-      uri,
-      cookieHeader: cookieHeader,
-    );
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw HttpException(
-        'Download failed with status ${response.statusCode}.',
-        uri: uri,
-      );
-    }
-    if (response.bodyBytes.isEmpty) {
-      throw HttpException('The downloaded file is empty.', uri: uri);
-    }
-
     final directory = Directory(
       '${(await getApplicationDocumentsDirectory()).path}${Platform.pathSeparator}downloads',
     );
-    await directory.create(recursive: true);
-    final fileName = safeDownloadFileName(response.headers, uri);
-    final file = await availableDownloadFile(directory, fileName);
-    await file.writeAsBytes(response.bodyBytes, flush: true);
+    final file = await saveTrustedDownload(
+      _client,
+      uri,
+      directory,
+      cookieHeader: cookieHeader,
+    );
     final openResult = await OpenFilex.open(file.path);
     return DownloadResult(path: file.path, openResult: openResult);
   }
 }
 
-Future<http.Response> fetchTrustedDownload(
+Future<http.StreamedResponse> fetchTrustedDownload(
   http.Client client,
   Uri start, {
   String cookieHeader = '',
@@ -74,26 +61,26 @@ Future<http.Response> fetchTrustedDownload(
         if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
       });
     final streamed = await client.send(request);
-    final response = await http.Response.fromStream(streamed);
     final isRedirectStatus = const {
       301,
       302,
       303,
       307,
       308,
-    }.contains(response.statusCode);
+    }.contains(streamed.statusCode);
     if (!isRedirectStatus) {
-      return response;
+      return streamed;
     }
-    if (redirect == maxRedirects) {
-      break;
-    }
-    final location = response.headers['location'];
+    final location = streamed.headers['location'];
+    await streamed.stream.drain<void>();
     if (location == null || location.trim().isEmpty) {
       throw HttpException(
         'Download redirect has no destination.',
         uri: current,
       );
+    }
+    if (redirect == maxRedirects) {
+      break;
     }
     current = current.resolve(location);
     if (!isTrustedAppUrl(current)) {
@@ -101,6 +88,65 @@ Future<http.Response> fetchTrustedDownload(
     }
   }
   throw HttpException('Too many download redirects.', uri: start);
+}
+
+Future<File> saveTrustedDownload(
+  http.Client client,
+  Uri start,
+  Directory directory, {
+  String cookieHeader = '',
+  int maxRedirects = 5,
+}) async {
+  final response = await fetchTrustedDownload(
+    client,
+    start,
+    cookieHeader: cookieHeader,
+    maxRedirects: maxRedirects,
+  );
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    await response.stream.drain<void>();
+    throw HttpException(
+      'Download failed with status ${response.statusCode}.',
+      uri: start,
+    );
+  }
+
+  final responseUri = response.request?.url ?? start;
+  await directory.create(recursive: true);
+  final fileName = safeDownloadFileName(response.headers, responseUri);
+  final file = await availableDownloadFile(directory, fileName);
+  final sink = file.openWrite();
+  var byteCount = 0;
+  var sinkClosed = false;
+  try {
+    await for (final chunk in response.stream) {
+      byteCount += chunk.length;
+      sink.add(chunk);
+    }
+    await sink.flush();
+    await sink.close();
+    sinkClosed = true;
+    if (byteCount == 0) {
+      throw HttpException('The downloaded file is empty.', uri: responseUri);
+    }
+    return file;
+  } catch (_) {
+    if (!sinkClosed) {
+      try {
+        await sink.close();
+      } on Object {
+        // Preserve the download error; the partial file is removed below.
+      }
+    }
+    try {
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } on FileSystemException {
+      // Preserve the original download error.
+    }
+    rethrow;
+  }
 }
 
 Future<File> availableDownloadFile(Directory directory, String fileName) async {

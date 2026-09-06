@@ -16,3 +16,11 @@ bool isExternalWebUrl(Uri uri) {
   return (uri.scheme == 'https' || uri.scheme == 'http') &&
       !isTrustedAppUrl(uri);
 }
+
+bool canLaunchExternalNavigation({
+  required bool isMainFrame,
+  required bool isNewWindow,
+  required bool isUserInitiated,
+}) {
+  return isUserInitiated && (isMainFrame || isNewWindow);
+}

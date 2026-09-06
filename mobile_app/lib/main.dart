@@ -153,7 +153,15 @@ class _WebAppScreenState extends State<WebAppScreen> {
     if (isTrustedAppUrl(uri)) {
       return NavigationActionPolicy.ALLOW;
     }
-    if (isSystemUrl(uri) || isExternalWebUrl(uri)) {
+    final isUserInitiated =
+        action.hasGesture == true ||
+        action.navigationType == NavigationType.LINK_ACTIVATED;
+    if ((isSystemUrl(uri) || isExternalWebUrl(uri)) &&
+        canLaunchExternalNavigation(
+          isMainFrame: action.isForMainFrame,
+          isNewWindow: false,
+          isUserInitiated: isUserInitiated,
+        )) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
     return NavigationActionPolicy.CANCEL;
@@ -162,13 +170,26 @@ class _WebAppScreenState extends State<WebAppScreen> {
   Future<bool?> _handleNewWindow(CreateWindowAction action) async {
     final webUri = action.request.url;
     if (webUri == null) {
-      return true;
+      return false;
     }
     final uri = Uri.parse(webUri.toString());
+    final isUserInitiated =
+        action.hasGesture == true ||
+        action.navigationType == NavigationType.LINK_ACTIVATED;
+    final canOpen = canLaunchExternalNavigation(
+      isMainFrame: action.isForMainFrame,
+      isNewWindow: true,
+      isUserInitiated: isUserInitiated,
+    );
+    if (!canOpen) {
+      return false;
+    }
     if (isTrustedAppUrl(uri)) {
       await _webController?.loadUrl(urlRequest: URLRequest(url: webUri));
     } else if (isSystemUrl(uri) || isExternalWebUrl(uri)) {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } else {
+      return false;
     }
     return true;
   }
@@ -241,7 +262,7 @@ class _WebAppScreenState extends State<WebAppScreen> {
                   cacheEnabled: true,
                   clearCache: false,
                   supportMultipleWindows: true,
-                  javaScriptCanOpenWindowsAutomatically: true,
+                  javaScriptCanOpenWindowsAutomatically: false,
                   useShouldOverrideUrlLoading: true,
                   useOnDownloadStart: true,
                   safeBrowsingEnabled: true,

@@ -35,10 +35,6 @@
 		<string>Oyster Mushroom Manager uses the camera only when you choose to photograph a document for upload.</string>
 		<key>NSPhotoLibraryUsageDescription</key>
 		<string>Oyster Mushroom Manager accesses your photo library only when you choose a photo for upload.</string>
-		<key>UIFileSharingEnabled</key>
-		<true/>
-		<key>LSSupportsOpeningDocumentsInPlace</key>
-		<true/>
 		<key>LSApplicationQueriesSchemes</key>
 		<array>
 			<string>tel</string>
