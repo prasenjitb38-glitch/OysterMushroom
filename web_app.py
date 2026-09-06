@@ -201,7 +201,9 @@ def suppliers_web():
 
 @app.route("/labour")
 @permission("labour")
-def labour_web():return table_page("Labour",("ID","Worker","Date","Work","Batch","Amount","Paid","Due"),"SELECT id,worker_name,work_date,work_type,batch_no,amount,paid,amount-paid FROM labour ORDER BY id DESC",create_resource="labour",action_resource="labour")
+def labour_web():return table_page("Labour",("ID","Worker","Date","Work","Batch","Amount","Paid","Due"),"""SELECT id,worker_name,work_date,work_type,batch_no,amount,paid,
+    amount-paid-COALESCE((SELECT SUM(p.amount) FROM labour_payments p WHERE p.labour_id=labour.id),0)
+    FROM labour ORDER BY id DESC""",create_resource="labour",action_resource="labour")
 
 @app.route("/payments",methods=["GET","POST"])
 @permission("payments")

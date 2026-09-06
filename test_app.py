@@ -422,6 +422,8 @@ class AppTests(unittest.TestCase):
         self.services.set_desktop_role("ADMIN");customer,supplier,labour=self.seed();client=web_app.app.test_client()
         with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="pay-token"
         def post(path,**data):data["csrf_token"]="pay-token";response=client.post(path,data=data);self.assertEqual(response.status_code,302);return response
+        with database.get_connection() as c:c.execute("INSERT INTO labour(worker_name,work_date,amount,paid) VALUES('Other Worker','2026-09-05',1000,0)")
+        with self.assertRaises(ValueError):self.record_payment("2026-09-05","LABOUR PAYMENT",labour,151,"Bank","TOO-MUCH")
         cases=(("SUPPLIER PAYMENT",supplier,"SUP-WEB",100,self.services.supplier_outstanding),("LABOUR PAYMENT",labour,"LAB-WEB",100,lambda _id:self.services.labour_due()))
         for kind,party,reference,amount,due in cases:
             before=due(party);post("/manage/payment/new",payment_date="2026-09-05",party=f"{kind}|{party}",amount=str(amount),payment_mode="Bank",reference=reference,notes="")
@@ -429,6 +431,8 @@ class AppTests(unittest.TestCase):
             self.assertEqual(due(party),before-amount);post(f"/manage/payment/{ledger}/edit",payment_date="2026-09-05",party=f"{kind}|{party}",amount="50",payment_mode="Bank",reference=reference,notes="edited");self.assertEqual(due(party),before-50)
             with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE id=?",(ledger,)).fetchone()[0],1)
             post(f"/manage/payment/{ledger}/delete");self.assertEqual(due(party),before)
+        labour_page=client.get("/labour").get_data(as_text=True)
+        self.assertIn("<td>150.0</td>",labour_page)
 
     def test_payment_edit_uses_party_id_and_credit_update_rolls_back(self):
         from payment_service import record_payment,update_payment
@@ -451,11 +455,32 @@ class AppTests(unittest.TestCase):
         from payment_service import delete_payment,record_payment,update_payment
         self.services.set_desktop_role("ADMIN")
         ledger=record_payment("2026-09-06","OTHER INCOME",None,40,"Cash","OTHER-I")
-        self.assertEqual(self.services.cash_balance("Cash"),40)
+        second=record_payment("2026-09-06","OTHER INCOME",None,10,"Cash","OTHER-I-2")
+        self.assertEqual(self.services.cash_balance("Cash"),50)
         update_payment(ledger,"2026-09-06","OTHER PAYMENT",None,15,"Cash","OTHER-O")
-        self.assertEqual(self.services.cash_balance("Cash"),-15)
+        self.assertEqual(self.services.cash_balance("Cash"),-5)
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_table='manual_payment'").fetchone()[0],2)
         delete_payment(ledger)
+        self.assertEqual(self.services.cash_balance("Cash"),10)
+        delete_payment(second)
         self.assertEqual(self.services.cash_balance("Cash"),0)
+
+    def test_customer_receipt_is_atomic_and_reference_is_per_party(self):
+        import sqlite3
+        from unittest import mock
+        import payment_service
+        self.services.set_desktop_role("ADMIN")
+        customer,_,_=self.seed()
+        with database.get_connection() as c:other=c.execute("INSERT INTO customers(name,opening_due) VALUES('Other Customer',100)").lastrowid
+        self.record_payment("2026-09-06","CUSTOMER PAYMENT",customer,10,"Bank","Receipt-1")
+        with self.assertRaises(ValueError):self.record_payment("2026-09-06","CUSTOMER PAYMENT",customer,5,"Bank"," receipt-1 ")
+        self.record_payment("2026-09-06","CUSTOMER PAYMENT",other,5,"Bank","receipt-1")
+        with mock.patch.object(payment_service,"post_ledger",side_effect=sqlite3.IntegrityError("ledger failed")):
+            with self.assertRaises(sqlite3.IntegrityError):self.record_payment("2026-09-06","CUSTOMER PAYMENT",customer,5,"Bank","ROLLBACK")
+        with database.get_connection() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM customer_payments WHERE reference_no='ROLLBACK'").fetchone()[0],0)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE reference='ROLLBACK'").fetchone()[0],0)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM customer_payments WHERE LOWER(reference_no)='receipt-1'").fetchone()[0],2)
 
     def test_live_payment_and_invoice_pdf_regression(self):
         import web_app

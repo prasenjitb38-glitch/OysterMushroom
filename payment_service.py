@@ -51,10 +51,30 @@ def _payment_limit(conn, payment_type, party_id):
 
 def _check_duplicate_reference(conn, table, party_column, party_id, reference):
     if reference and conn.execute(
-        f"SELECT 1 FROM {table} WHERE {party_column}=? AND TRIM(reference_no)=? LIMIT 1",
+        f"""SELECT 1 FROM {table}
+            WHERE {party_column}=? AND TRIM(reference_no)=? COLLATE NOCASE LIMIT 1""",
         (party_id, reference),
     ).fetchone():
         raise ValueError("A payment with this reference already exists for this party")
+
+
+def _insert_manual_ledger(conn, payment_date, payment_type, amount, mode, reference, notes):
+    inflow = payment_type == "OTHER INCOME"
+    ledger_id = conn.execute(
+        """INSERT INTO cash_ledger
+           (transaction_date,transaction_type,reference,payment_mode,debit,credit,notes)
+           VALUES(?,?,?,?,?,?,?)""",
+        (
+            payment_date, payment_type, reference, mode,
+            0 if inflow else amount, amount if inflow else 0, notes,
+        ),
+    ).lastrowid
+    conn.execute(
+        """UPDATE cash_ledger SET source_table='manual_payment',source_id=?
+           WHERE id=?""",
+        (ledger_id, ledger_id),
+    )
+    return ledger_id
 
 
 def record_payment(payment_date, payment_type, party_id, amount, mode, reference="", notes=""):
@@ -64,8 +84,6 @@ def record_payment(payment_date, payment_type, party_id, amount, mode, reference
 
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        source_table = "manual_payment"
-        source_id = 0
         if payment_type in PAYMENT_SOURCES:
             table, party_column = PAYMENT_SOURCES[payment_type]
             allowed = _payment_limit(conn, payment_type, party_id)
@@ -79,12 +97,16 @@ def record_payment(payment_date, payment_type, party_id, amount, mode, reference
                     VALUES(?,?,?,?,?,?)""",
                 (payment_date, party_id, amount, mode, reference, notes),
             ).lastrowid
-        ledger_id = post_ledger(
-            conn, source_table, source_id, payment_date, payment_type, mode, amount,
-            payment_type in ("CUSTOMER PAYMENT", "OTHER INCOME"), reference, notes,
-        )
-        if ledger_id is None:
-            raise ValueError("Payment mode must post to Cash or Bank ledger")
+            ledger_id = post_ledger(
+                conn, table, source_id, payment_date, payment_type, mode, amount,
+                payment_type == "CUSTOMER PAYMENT", reference, notes,
+            )
+            if ledger_id is None:
+                raise ValueError("Payment mode must post to Cash or Bank ledger")
+        else:
+            ledger_id = _insert_manual_ledger(
+                conn, payment_date, payment_type, amount, mode, reference, notes
+            )
     publish("payment_changed")
     return ledger_id
 
@@ -135,7 +157,7 @@ def update_payment(ledger_id, payment_date, payment_type, party_id, amount, mode
             conn.execute(f"DELETE FROM {old[0]} WHERE id=?", (old[1],))
 
         source_table = "manual_payment"
-        source_id = 0
+        source_id = ledger_id
         if payment_type in PAYMENT_SOURCES:
             table, party_column = PAYMENT_SOURCES[payment_type]
             allowed = _payment_limit(conn, payment_type, party_id)
