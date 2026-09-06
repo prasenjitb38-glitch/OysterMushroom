@@ -483,7 +483,7 @@ def business_logo():
 @permission("backup_restore")
 def backup_download():
     import database
-    from modules.system_tools import backup_database
+    from backup_service import backup_database
     path=os.path.join(tempfile.gettempdir(),f"mushroom-download-{secrets.token_hex(8)}.db")
     try:
         backup_database(database.DB_FILE,path)
@@ -500,7 +500,7 @@ def backup_download():
 @permission("backup_restore")
 def backup_restore_api():
     import database
-    from modules.system_tools import restore_database
+    from backup_service import restore_database
     upload=request.files.get("backup")
     if not upload or not upload.filename:flash("Choose a backup file.","error");return redirect(url_for("backup_web"))
     if not upload.filename.lower().endswith((".db",".sqlite",".sqlite3")):flash("Backup must be a .db, .sqlite, or .sqlite3 file.","error");return redirect(url_for("backup_web"))

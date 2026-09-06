@@ -260,7 +260,7 @@ class AppTests(unittest.TestCase):
 
     def test_backup_restore_roundtrip(self):
         import shutil,sqlite3
-        from modules.system_tools import backup_database,restore_database
+        from backup_service import backup_database,restore_database
         working=os.path.join(self.temp.name,"working.db");backup=os.path.join(self.temp.name,"backup.db");shutil.copy2(database.DB_FILE,working);backup_database(working,backup)
         with sqlite3.connect(working) as c:c.execute("INSERT INTO settings(key,value) VALUES('roundtrip','changed') ON CONFLICT(key) DO UPDATE SET value='changed'")
         restore_database(backup,working)
@@ -670,7 +670,7 @@ print('web-safe')
         import io,sqlite3,threading,time
         from unittest import mock
         import web_app
-        from modules.system_tools import backup_database,restore_database,validate_backup
+        from backup_service import backup_database,restore_database,validate_backup
         valid=os.path.join(self.temp.name,"valid.db");backup_database(database.DB_FILE,valid);self.assertTrue(validate_backup(valid))
         encoded=os.path.join(self.temp.name,"backup # encoded.db");backup_database(database.DB_FILE,encoded);self.assertTrue(validate_backup(encoded))
         with self.assertRaises(ValueError):backup_database(valid,valid)
@@ -702,6 +702,34 @@ print('web-safe')
         with database.get_connection() as outer:
             with database.get_connection() as inner:self.assertEqual(inner.execute("SELECT 1").fetchone()[0],1)
             self.assertEqual(outer.execute("SELECT 1").fetchone()[0],1)
+
+    def test_web_backup_routes_do_not_import_desktop_modules(self):
+        import builtins,io,sqlite3
+        from unittest import mock
+        import backup_service,web_app
+        client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="web-safe-backup-token"
+        real_import=builtins.__import__
+        attempted=[]
+        def web_safe_import(name,*args,**kwargs):
+            if name=="tkinter" or name.startswith("tkinter.") or name=="modules.system_tools":
+                attempted.append(name)
+                raise AssertionError(f"Desktop-only import attempted: {name}")
+            return real_import(name,*args,**kwargs)
+        with mock.patch("builtins.__import__",side_effect=web_safe_import):
+            downloaded=client.get("/backup/download")
+        self.assertEqual(downloaded.status_code,200);self.assertEqual(attempted,[])
+        path=os.path.join(self.temp.name,"web-download.db")
+        with open(path,"wb") as output:output.write(downloaded.data)
+        c=sqlite3.connect(path)
+        try:
+            self.assertEqual(c.execute("PRAGMA integrity_check").fetchone()[0],"ok")
+            self.assertTrue(backup_service.REQUIRED_SCHEMA.keys()<={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")})
+        finally:c.close()
+        with mock.patch.object(backup_service,"restore_database",return_value=os.path.join(self.temp.name,"safety.db")) as restore:
+            with mock.patch("builtins.__import__",side_effect=web_safe_import):
+                restored=client.post("/backup/restore",data={"csrf_token":"web-safe-backup-token","backup":(io.BytesIO(downloaded.data),"backup.db")},content_type="multipart/form-data")
+        self.assertEqual(restored.status_code,302);self.assertEqual(attempted,[]);restore.assert_called_once()
 
     def test_owner_capital_complete_lifecycle_and_pnl_isolation(self):
         from capital_service import capital_summary,delete_capital,save_capital
