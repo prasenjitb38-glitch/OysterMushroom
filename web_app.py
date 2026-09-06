@@ -14,6 +14,7 @@ from services import (
     validate_sale,
     require_permission, save_sale,
 )
+from business_reporting import chart_view_model, report_csv, report_pdf, report_view_model, resolve_dates
 
 create_database()
 app = Flask(__name__)
@@ -22,9 +23,14 @@ configured_secret=os.environ.get("SECRET_KEY")
 if production_mode and (not configured_secret or len(configured_secret)<32):raise RuntimeError("A strong SECRET_KEY (32+ characters) is required in production")
 app.secret_key=configured_secret or secrets.token_hex(32)
 app.config.update(SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE="Lax",SESSION_COOKIE_SECURE=production_mode)
+app.config["MAX_CONTENT_LENGTH"]=50*1024*1024
 from web_crud import crud
 app.register_blueprint(crud)
 _attempts={}
+
+@app.errorhandler(413)
+def upload_too_large(_error):
+    return "Uploaded file is too large (maximum 50 MB).",413
 
 @app.before_request
 def csrf_protect():
@@ -263,16 +269,24 @@ def pnl_web():
 @app.route("/reports")
 @permission("reports")
 def reports_web():
-    from services import cash_balance,labour_due
-    return render_template("module_web.html",title="Business Reports",headers=("Metric","Value"),rows=(("Mushroom Stock",mushroom_stock()),("Customer Due",customer_outstanding()),("Supplier Due",supplier_outstanding()),("Labour Due",labour_due()),("Cash",cash_balance("Cash")),("Bank",cash_balance("Bank"))),date_filter=True)
+    try:report=report_view_model(request.args.get("start"),request.args.get("end"),request.args.get("quick"))
+    except ValueError as e:report=None;error=str(e)
+    except Exception:
+        app.logger.exception("Business report generation failed");report=None;error="Report is temporarily unavailable."
+    return render_template("reports.html",title="Business Reports",report=report,error=locals().get("error"))
 
 @app.route("/charts")
 @permission("charts")
-def charts_web():return render_template("module_web.html",title="Charts",headers=(),rows=(),chart_url=url_for("chart_download"))
+def charts_web():
+    try:start,end=resolve_dates(request.args.get("start"),request.args.get("end"));period=request.args.get("period","Daily");chart_view_model(start,end,period)
+    except ValueError as e:start=request.args.get("start","");end=request.args.get("end","");period=request.args.get("period","Daily");error=str(e)
+    except Exception:
+        app.logger.exception("Chart page generation failed");start=end="";period="Daily";error="Charts are temporarily unavailable."
+    return render_template("charts.html",title="Charts",filters={"start":start,"end":end,"period":period},error=locals().get("error"))
 
 @app.route("/invoices")
 @permission("sales.create")
-def invoices_web():return table_page("Invoices",("ID","Invoice","Date","Customer","Total","Paid","Due","PDF"),"SELECT s.id,s.invoice_no,s.sale_date,COALESCE(c.name,'Cash Customer'),s.total_amount,s.paid_amount,s.total_amount-s.paid_amount,'PDF' FROM sales s LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC",invoice_links=True)
+def invoices_web():return table_page("Invoices",("ID","Invoice","Date","Customer","Total","Paid","Due"),"SELECT s.id,s.invoice_no,s.sale_date,COALESCE(c.name,'Cash Customer'),s.total_amount,s.paid_amount,s.total_amount-s.paid_amount FROM sales s LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC",invoice_links=True)
 
 @app.route("/settings",methods=["GET","POST"])
 @permission("settings")
@@ -314,11 +328,40 @@ def reports_api():
     with get_connection() as c:materials=[{"id":r[0],"item":r[1],"stock":raw_material_stock(r[0],c)} for r in c.execute("SELECT id,item FROM raw_materials")]
     return jsonify(pnl=pnl(request.args.get("start"),request.args.get("end")),mushroom_stock=mushroom_stock(),customer_due=customer_outstanding(),supplier_due=supplier_outstanding(),labour_due=labour_due(),cash=cash_balance("Cash"),bank=cash_balance("Bank"),materials=materials,batches=batch_cost_rows())
 
+@app.route("/api/charts")
+@permission("charts")
+def charts_data():
+    try:return jsonify(chart_view_model(request.args.get("start"),request.args.get("end"),request.args.get("period","Daily")))
+    except ValueError as e:return jsonify(error=str(e)),400
+    except Exception:
+        app.logger.exception("Chart data generation failed")
+        return jsonify(error="Chart data is temporarily unavailable."),503
+
+@app.route("/reports/export.<format>")
+@permission("reports")
+def reports_export(format):
+    try:
+        model=report_view_model(request.args.get("start"),request.args.get("end"))
+        if format=="csv":return send_file(io.BytesIO(report_csv(model)),mimetype="text/csv",download_name=f"business-report-{model['start']}-{model['end']}.csv",as_attachment=True)
+        if format=="pdf":return send_file(report_pdf(model),mimetype="application/pdf",download_name=f"business-report-{model['start']}-{model['end']}.pdf",as_attachment=True)
+        return jsonify(error="Unsupported export format"),404
+    except ValueError as e:return jsonify(error=str(e)),400
+    except Exception:
+        app.logger.exception("Report export failed")
+        return jsonify(error="Report export is temporarily unavailable."),503
+
 @app.route("/charts.png")
 @permission("charts")
 def chart_download():
     from modules.analytics import generate_chart_file
-    path=os.path.join(tempfile.gettempdir(),f"mushroom-chart-{secrets.token_hex(6)}.png");generate_chart_file(path);return send_file(path,mimetype="image/png",download_name="business-charts.png")
+    path=os.path.join(tempfile.gettempdir(),f"mushroom-chart-{secrets.token_hex(6)}.png")
+    try:
+        generate_chart_file(path)
+        with open(path,"rb") as source:data=source.read()
+        return send_file(io.BytesIO(data),mimetype="image/png",download_name="business-charts.png")
+    finally:
+        try:os.remove(path)
+        except OSError:pass
 
 @app.route("/invoice/<int:sale_id>.pdf")
 @permission("sales.create")
@@ -331,11 +374,41 @@ def invoice_download(sale_id):
         return jsonify(error="Invoice PDF is temporarily unavailable"),503
     return send_file(output,mimetype="application/pdf",download_name=f"invoice-{sale_id}.pdf",as_attachment=request.args.get("download")=="1")
 
+@app.route("/invoice/<int:sale_id>/view")
+@permission("sales.create")
+def invoice_view(sale_id):
+    from services import invoice_data
+    try:return render_template("invoice.html",invoice=invoice_data(sale_id),sale_id=sale_id)
+    except ValueError:return "Invoice not found",404
+    except Exception:
+        app.logger.exception("Invoice preview failed for sale %s",sale_id)
+        return "Invoice preview is temporarily unavailable",503
+
+@app.route("/business-logo")
+@login_required
+def business_logo():
+    from services import setting
+    logo=setting("logo","")
+    if not logo or not os.path.isfile(logo) or os.path.splitext(logo)[1].lower() not in (".png",".jpg",".jpeg",".gif",".webp"):
+        return "",404
+    return send_file(logo)
+
 @app.route("/backup/download")
 @permission("backup_restore")
 def backup_download():
     import database
-    return send_file(database.DB_FILE,mimetype="application/vnd.sqlite3",download_name="mushroom-backup.db",as_attachment=True)
+    from modules.system_tools import backup_database
+    path=os.path.join(tempfile.gettempdir(),f"mushroom-download-{secrets.token_hex(8)}.db")
+    try:
+        backup_database(database.DB_FILE,path)
+        with open(path,"rb") as source:data=source.read()
+        return send_file(io.BytesIO(data),mimetype="application/vnd.sqlite3",download_name="mushroom-backup.db",as_attachment=True)
+    except Exception:
+        app.logger.exception("Database backup download failed")
+        return jsonify(error="Backup is temporarily unavailable."),503
+    finally:
+        try:os.remove(path)
+        except OSError:pass
 
 @app.route("/backup/restore",methods=["POST"])
 @permission("backup_restore")
@@ -343,14 +416,20 @@ def backup_restore_api():
     import database
     from modules.system_tools import restore_database
     upload=request.files.get("backup")
-    if not upload:return jsonify(error="Backup file required"),400
-    path=os.path.join(tempfile.gettempdir(),f"restore-{secrets.token_hex(8)}.db");upload.save(path)
-    try:restore_database(path,database.DB_FILE)
-    except (ValueError,OSError) as e:return jsonify(error=str(e)),400
+    if not upload or not upload.filename:flash("Choose a backup file.","error");return redirect(url_for("backup_web"))
+    if not upload.filename.lower().endswith((".db",".sqlite",".sqlite3")):flash("Backup must be a .db, .sqlite, or .sqlite3 file.","error");return redirect(url_for("backup_web"))
+    path=os.path.join(tempfile.gettempdir(),f"restore-{secrets.token_hex(8)}.db")
+    try:
+        upload.save(path)
+        restore_database(path,database.DB_FILE);flash("Database restored safely. A safety copy of the previous database was created.","success")
+    except ValueError as e:app.logger.warning("Restore rejected: %s",e);flash(str(e),"error")
+    except (OSError,sqlite3.Error) as e:app.logger.warning("Restore could not be completed: %s",e);flash("Restore could not be completed. The previous database was kept unchanged.","error")
+    except Exception:
+        app.logger.exception("Database restore failed and was rolled back");flash("Restore failed. The previous database was kept unchanged.","error")
     finally:
         try:os.remove(path)
         except OSError:pass
-    return jsonify(ok=True)
+    return redirect(url_for("backup_web"))
 
 @app.route("/health")
 def health():

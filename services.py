@@ -89,17 +89,21 @@ def raw_material_stock(material_id, conn=None):
     return result
 
 
-def batch_cost_rows():
+def batch_cost_rows(start=None, end=None):
+    if bool(start) != bool(end):
+        raise ValueError("Both start and end dates are required")
+    date_filter=" BETWEEN ? AND ?" if start and end else ""
+    date_params=(start,end) if start and end else ()
     expected_rate = float(setting("expected_rate", "0") or 0)
     with get_connection() as conn:
         batches = conn.execute("SELECT batch_no,production_date,bag_count,expected_yield FROM batches ORDER BY id DESC").fetchall()
         result=[]
         for batch,date,bags,expected_yield in batches:
-            production,wastage,saleable=conn.execute("SELECT COALESCE(SUM(production_kg),0),COALESCE(SUM(wastage_kg),0),COALESCE(SUM(saleable_kg),0) FROM daily_production WHERE batch_no=?",(batch,)).fetchone()
-            usage_cost=conn.execute("""SELECT COALESCE(SUM(u.quantity*COALESCE((SELECT SUM(p.total_amount)/NULLIF(SUM(p.quantity),0) FROM purchases p WHERE p.material_id=u.material_id),0)),0) FROM material_usage u WHERE u.batch_id=(SELECT id FROM batches WHERE batch_no=?)""",(batch,)).fetchone()[0]
-            purchases=conn.execute("""SELECT COALESCE(SUM(p.total_amount),0) FROM purchases p WHERE p.batch_no=? AND NOT EXISTS(SELECT 1 FROM material_usage u JOIN batches b ON b.id=u.batch_id WHERE b.batch_no=? AND u.material_id=p.material_id)""",(batch,batch)).fetchone()[0]+usage_cost
-            expenses=conn.execute("SELECT COALESCE(SUM(amount),0) FROM expenses WHERE batch_no=?",(batch,)).fetchone()[0]
-            labour=conn.execute("SELECT COALESCE(SUM(amount),0) FROM labour WHERE batch_no=?",(batch,)).fetchone()[0]
+            production,wastage,saleable=conn.execute("SELECT COALESCE(SUM(production_kg),0),COALESCE(SUM(wastage_kg),0),COALESCE(SUM(saleable_kg),0) FROM daily_production WHERE batch_no=?"+(" AND production_date"+date_filter if date_filter else ""),(batch,)+date_params).fetchone()
+            usage_cost=conn.execute("""SELECT COALESCE(SUM(u.quantity*COALESCE((SELECT SUM(p.total_amount)/NULLIF(SUM(p.quantity),0) FROM purchases p WHERE p.material_id=u.material_id),0)),0) FROM material_usage u WHERE u.batch_id=(SELECT id FROM batches WHERE batch_no=?)"""+(" AND u.usage_date"+date_filter if date_filter else ""),(batch,)+date_params).fetchone()[0]
+            purchases=conn.execute("""SELECT COALESCE(SUM(p.total_amount),0) FROM purchases p WHERE p.batch_no=? AND NOT EXISTS(SELECT 1 FROM material_usage u JOIN batches b ON b.id=u.batch_id WHERE b.batch_no=? AND u.material_id=p.material_id)"""+(" AND p.purchase_date"+date_filter if date_filter else ""),(batch,batch)+date_params).fetchone()[0]+usage_cost
+            expenses=conn.execute("SELECT COALESCE(SUM(amount),0) FROM expenses WHERE batch_no=?"+(" AND expense_date"+date_filter if date_filter else ""),(batch,)+date_params).fetchone()[0]
+            labour=conn.execute("SELECT COALESCE(SUM(amount),0) FROM labour WHERE batch_no=?"+(" AND work_date"+date_filter if date_filter else ""),(batch,)+date_params).fetchone()[0]
             total=purchases+expenses+labour; expected_sales=(expected_yield or 0)*expected_rate
             result.append((batch,date,bags,production,wastage,saleable,total,total/bags if bags else 0,total/saleable if saleable else 0,expected_sales,expected_sales-total))
     return result
@@ -477,6 +481,14 @@ def low_stock_materials():
 def invoice_data(sale_id):
     with get_connection() as c:
         r=c.execute("""SELECT s.invoice_no,s.sale_date,COALESCE(c.name,'Cash Customer'),COALESCE(c.mobile,''),COALESCE(c.address,''),COALESCE(b.batch_no,'Unallocated'),s.quantity_kg,s.rate_per_kg,s.discount,s.quantity_kg*s.rate_per_kg,s.total_amount,s.paid_amount,s.total_amount-s.paid_amount,s.payment_mode,s.notes FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN batches b ON b.id=s.batch_id WHERE s.id=?""",(sale_id,)).fetchone()
+        if r:
+            item_rows=c.execute("SELECT description,COALESCE(batch_no,?),quantity_kg,rate_per_kg,amount FROM sale_items WHERE sale_id=? ORDER BY id",(r[5],sale_id)).fetchall()
     if not r:raise ValueError("Sale not found")
     keys=("invoice_no","date","customer","customer_mobile","customer_address","batch","quantity","rate","discount","gross","net","paid","due","payment_mode","notes")
-    data=dict(zip(keys,r));data.update({k:setting(k) for k in ("business_name","address","mobile","gstin","logo")});return data
+    data=dict(zip(keys,r))
+    data["items"]=[{"description":x[0] or "Oyster Mushroom","batch":x[1],"quantity":x[2],"unit":"Kg","rate":x[3],"amount":x[4]} for x in item_rows] or [{"description":"Oyster Mushroom","batch":data["batch"],"quantity":data["quantity"],"unit":"Kg","rate":data["rate"],"amount":data["gross"]}]
+    mode=str(data["payment_mode"] or "").strip().lower()
+    data["cash_paid"]=data["paid"] if mode=="cash" else 0
+    data["bank_paid"]=data["paid"] if mode in ("bank","upi","online") else 0
+    data.update({k:setting(k) for k in ("business_name","address","mobile","email","gstin","logo")})
+    return data

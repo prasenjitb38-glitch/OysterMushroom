@@ -607,6 +607,67 @@ print('web-safe')
         response = web_app.app.test_client().get("/login")
         self.assertEqual(response.status_code, 200)
 
+    def test_invoice_preview_chart_and_report_web_features(self):
+        import web_app
+        customer,_,_=self.seed()
+        with database.get_connection() as c:
+            bid=c.execute("SELECT id FROM batches WHERE batch_no='B001'").fetchone()[0]
+            c.execute("UPDATE customers SET name=?,address=?,mobile=? WHERE id=?",("Very Long Customer Name "*8,"Long Address "*30,"9999999999",customer))
+            c.execute("INSERT INTO purchases(purchase_date,item,quantity,total_amount,batch_no) VALUES('2025-01-01','Old Cost',1,999,'B001')")
+        sale=self.services.save_sale({"invoice_no":"INV-PREVIEW","sale_date":"2026-09-04","customer_id":customer,"batch_id":bid,"quantity_kg":2,"rate_per_kg":125,"discount":10,"paid_amount":100,"payment_mode":"UPI","notes":"Handle carefully"})
+        client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="feature-token"
+        preview=client.get(f"/invoice/{sale}/view");self.assertEqual(preview.status_code,200);body=preview.get_data(as_text=True)
+        for value in ("INV-PREVIEW","Very Long Customer Name","B001","2.00","125.00","Cash Paid","Bank / Online Paid","₹100.00","₹140.00","window.print()"):self.assertIn(value,body)
+        listing=client.get("/invoices").get_data(as_text=True);self.assertIn('target="_blank"',listing);self.assertIn("Download PDF",listing)
+        pdf=client.get(f"/invoice/{sale}.pdf?download=1");self.assertEqual(pdf.status_code,200);self.assertTrue(pdf.data.startswith(b"%PDF"))
+        charts=client.get("/charts").get_data(as_text=True);self.assertIn("charts.js",charts);self.assertNotIn("charts.png",charts)
+        data=client.get("/api/charts?start=2026-09-01&end=2026-09-30&period=Monthly");self.assertEqual(data.status_code,200);payload=data.get_json();self.assertEqual(len(payload["charts"]),8);self.assertEqual(payload["charts"][0]["datasets"][0]["data"],[240.0]);self.assertEqual(payload["charts"][7]["datasets"][0]["data"],[400.0])
+        self.assertTrue(client.get("/api/charts?start=2030-01-01&end=2030-01-02").get_json()["empty"])
+        self.assertEqual(client.get("/api/charts?start=bad&end=2030-01-02").status_code,400)
+        report=client.get("/reports?start=2026-09-04&end=2026-09-04");self.assertEqual(report.status_code,200);report_body=report.get_data(as_text=True)
+        for section in ("Sales","Purchases","Production","Harvest","Expenses","Raw Material Stock","Mushroom Stock Reconciliation","Customer Due","Supplier Due","Labour Due","Cash / Bank","Profit Summary","Batch Report"):self.assertIn(section,report_body)
+        csv=client.get("/reports/export.csv?start=2026-09-04&end=2026-09-04");self.assertEqual(csv.status_code,200);self.assertIn(b"Profit Summary",csv.data)
+        report_pdf=client.get("/reports/export.pdf?start=2026-09-04&end=2026-09-04");self.assertEqual(report_pdf.status_code,200);self.assertTrue(report_pdf.data.startswith(b"%PDF"))
+        css=client.get("/static/mobile.css").get_data(as_text=True);self.assertIn("@media print",css);self.assertIn("grid-template-columns:repeat(2",css)
+
+    def test_hardened_backup_validation_rollback_and_lock(self):
+        import io,sqlite3,threading,time
+        from unittest import mock
+        import web_app
+        from modules.system_tools import backup_database,restore_database,validate_backup
+        valid=os.path.join(self.temp.name,"valid.db");backup_database(database.DB_FILE,valid);self.assertTrue(validate_backup(valid))
+        encoded=os.path.join(self.temp.name,"backup # encoded.db");backup_database(database.DB_FILE,encoded);self.assertTrue(validate_backup(encoded))
+        with self.assertRaises(ValueError):backup_database(valid,valid)
+        for name,data in (("empty.db",b""),("text.db",b"not sqlite")):
+            path=os.path.join(self.temp.name,name)
+            with open(path,"wb") as f:f.write(data)
+            with self.assertRaises(ValueError):validate_backup(path)
+        wrong=os.path.join(self.temp.name,"wrong.db")
+        c=sqlite3.connect(wrong);c.execute("CREATE TABLE unrelated(id INTEGER)");c.commit();c.close()
+        with self.assertRaises(ValueError):validate_backup(wrong)
+        client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False};s["csrf_token"]="backup-token"
+        downloaded=client.get("/backup/download");self.assertEqual(downloaded.status_code,200);self.assertTrue(downloaded.data.startswith(b"SQLite format 3\x00"))
+        with mock.patch("werkzeug.datastructures.FileStorage.save",side_effect=OSError("disk full")):
+            failed=client.post("/backup/restore",data={"csrf_token":"backup-token","backup":(io.BytesIO(b"SQLite format 3\x00"),"backup.db")},content_type="multipart/form-data",follow_redirects=True)
+        self.assertEqual(failed.status_code,200);self.assertIn("previous database was kept unchanged",failed.get_data(as_text=True))
+        with database.get_connection() as c:c.execute("UPDATE settings SET value='safe-current' WHERE key='business_name'")
+        replacement=os.path.join(self.temp.name,"replacement.db");backup_database(valid,replacement)
+        with mock.patch.object(database,"create_database",side_effect=RuntimeError("injected failure")):
+            with self.assertRaises(RuntimeError):restore_database(replacement,database.DB_FILE)
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT value FROM settings WHERE key='business_name'").fetchone()[0],"safe-current");self.assertEqual(c.execute("PRAGMA integrity_check").fetchone()[0],"ok");self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(),[])
+        entered=threading.Event()
+        def connect():
+            with database.get_connection():entered.set()
+        database.DB_MAINTENANCE_LOCK.acquire()
+        try:worker=threading.Thread(target=connect);worker.start();time.sleep(.1);self.assertFalse(entered.is_set())
+        finally:database.DB_MAINTENANCE_LOCK.release()
+        worker.join(2);self.assertTrue(entered.is_set());self.assertEqual(client.get("/health").status_code,200)
+        with database.get_connection() as outer:
+            with database.get_connection() as inner:self.assertEqual(inner.execute("SELECT 1").fetchone()[0],1)
+            self.assertEqual(outer.execute("SELECT 1").fetchone()[0],1)
+
     def test_gui_pages(self):
         try:
             import tkinter as tk, main

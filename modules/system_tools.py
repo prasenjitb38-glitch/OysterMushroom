@@ -1,8 +1,9 @@
 import os
-import shutil
 import sqlite3
 import tkinter as tk
+from contextlib import closing
 from datetime import datetime
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import database
@@ -10,20 +11,65 @@ from database import authenticate, get_connection, hash_password, verify_passwor
 from services import setting
 from services import enforce_desktop
 
+REQUIRED_SCHEMA={
+    "settings":{"key","value"},"users":{"id","username","password_hash","role"},
+    "batches":{"id","batch_no","production_date"},"sales":{"id","invoice_no","sale_date","total_amount","paid_amount"},
+    "customers":{"id","name"},"purchases":{"id","purchase_date","total_amount"},
+    "expenses":{"id","expense_date","amount"},"cash_ledger":{"id","transaction_date","debit","credit"},
+}
+
+def _readonly_uri(path):
+    return Path(path).resolve().as_uri()+"?mode=ro"
+
 def validate_backup(path):
-    with sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro",uri=True) as check:
-        if check.execute("PRAGMA integrity_check").fetchone()[0]!="ok":raise ValueError("Selected backup is damaged")
-        required={"settings","users","batches","sales"};actual={r[0] for r in check.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if not required<=actual:raise ValueError("Selected file is not a compatible backup")
+    if not path or not os.path.isfile(path) or os.path.getsize(path)<100:
+        raise ValueError("Selected backup is empty or missing")
+    with open(path,"rb") as source:
+        if source.read(16)!=b"SQLite format 3\x00":
+            raise ValueError("Selected file is not a SQLite database")
+    with closing(sqlite3.connect(_readonly_uri(path),uri=True)) as check:
+        check.execute("PRAGMA foreign_keys=ON")
+        if check.execute("PRAGMA integrity_check").fetchone()[0]!="ok":
+            raise ValueError("Selected backup is damaged")
+        if check.execute("PRAGMA foreign_key_check").fetchall():
+            raise ValueError("Selected backup has invalid linked records")
+        actual={r[0] for r in check.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not REQUIRED_SCHEMA.keys()<=actual:
+            raise ValueError("Selected file is not an Oyster Mushroom backup")
+        for table,required in REQUIRED_SCHEMA.items():
+            columns={r[1] for r in check.execute(f"PRAGMA table_info({table})")}
+            if not required<=columns:
+                raise ValueError("Selected file has an incompatible Oyster Mushroom schema")
     return True
 def backup_database(source,destination):
-    with sqlite3.connect(source) as src,sqlite3.connect(destination) as dst:src.backup(dst)
+    source=os.path.abspath(source);destination=os.path.abspath(destination)
+    if source==destination:
+        raise ValueError("Backup source and destination must be different")
+    os.makedirs(os.path.dirname(destination),exist_ok=True)
+    with database.DB_MAINTENANCE_LOCK:
+        with closing(sqlite3.connect(_readonly_uri(source),uri=True)) as src:
+            with closing(sqlite3.connect(destination)) as dst:src.backup(dst)
     return validate_backup(destination)
 def restore_database(backup,target):
     validate_backup(backup)
-    with sqlite3.connect(backup) as src,sqlite3.connect(target) as dst:
-        src.backup(dst);dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    return validate_backup(target)
+    target=os.path.abspath(target);folder=os.path.dirname(target);os.makedirs(folder,exist_ok=True)
+    stamp=datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    safety=os.path.join(folder,f".mushroom-safety-{stamp}.db")
+    with database.DB_MAINTENANCE_LOCK:
+        backup_database(target,safety)
+        try:
+            with closing(sqlite3.connect(_readonly_uri(backup),uri=True)) as src:
+                with closing(sqlite3.connect(target)) as dst:src.backup(dst)
+            if target==os.path.abspath(database.DB_FILE):database.create_database()
+            validate_backup(target)
+        except Exception:
+            with closing(sqlite3.connect(_readonly_uri(safety),uri=True)) as src:
+                with closing(sqlite3.connect(target)) as dst:src.backup(dst)
+            if target==os.path.abspath(database.DB_FILE):
+                try:database.create_database()
+                except Exception:pass
+            raise
+    return safety
 
 
 class SettingsPage:
@@ -78,7 +124,7 @@ class BackupPage:
         if not p or not messagebox.askyesno("Confirm","Current database safety backup করে restore করবেন?",parent=self.frame):return
         try:
             validate_backup(p)
-            safety=database.DB_FILE+".safety_"+datetime.now().strftime("%Y%m%d_%H%M%S");shutil.copy2(database.DB_FILE,safety);restore_database(p,database.DB_FILE);messagebox.showinfo("Restored","Restore complete. Application restart করুন।",parent=self.frame)
+            safety=restore_database(p,database.DB_FILE);messagebox.showinfo("Restored",f"Restore complete.\nSafety copy: {safety}",parent=self.frame)
         except Exception as e:messagebox.showerror("Restore Error",str(e),parent=self.frame)
     def show(self):self.frame.pack(fill="both",expand=True)
 

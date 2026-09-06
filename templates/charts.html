@@ -1,0 +1,7 @@
+{% extends 'base.html' %}{% block body %}
+<section class="hero"><h1>Business Charts</h1><form method="get" class="inline-form"><label>From<input type="date" name="start" value="{{filters.start}}"></label><label>To<input type="date" name="end" value="{{filters.end}}"></label><label>Period<select name="period">{% for p in ('Daily','Monthly','Yearly') %}<option{% if filters.period==p %} selected{% endif %}>{{p}}</option>{% endfor %}</select></label><button>Apply</button></form>{% if error %}<div class="flash error">{{error}}</div>{% endif %}</section>
+<div id="chart-empty" class="empty-message" hidden>No data available for selected period</div><div id="chart-error" class="flash error" hidden>Charts could not be loaded. The report data remains safe; please retry.</div><div id="chart-grid" class="chart-grid" data-url="{{url_for('charts_data',start=filters.start,end=filters.end,period=filters.period)}}"></div>
+<noscript><div class="flash error">JavaScript is required to display charts.</div></noscript>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" crossorigin="anonymous" onerror="document.getElementById('chart-error').hidden=false"></script>
+<script src="{{url_for('static',filename='charts.js')}}"></script>
+{% endblock %}

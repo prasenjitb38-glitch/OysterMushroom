@@ -2,6 +2,7 @@ import os
 import sqlite3
 import hashlib
 import secrets
+import threading
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,9 +15,22 @@ def resolve_database_paths(environment=None, base_dir=BASE_DIR):
     return folder,os.path.join(folder,"mushroom.db")
 
 DB_FOLDER,DB_FILE=resolve_database_paths()
+DB_MAINTENANCE_LOCK=threading.RLock()
 
 
 class DatabaseConnection(sqlite3.Connection):
+    _maintenance_lock_held = False
+
+    def close(self):
+        if self._maintenance_lock_held:
+            self._maintenance_lock_held = False
+            try:
+                super().close()
+            finally:
+                DB_MAINTENANCE_LOCK.release()
+        else:
+            super().close()
+
     def __exit__(self, exc_type, exc_value, traceback):
         try:
             return super().__exit__(exc_type, exc_value, traceback)
@@ -25,12 +39,18 @@ class DatabaseConnection(sqlite3.Connection):
 
 
 def get_connection():
-    os.makedirs(DB_FOLDER, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE, factory=DatabaseConnection, timeout=15)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 15000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+    DB_MAINTENANCE_LOCK.acquire()
+    try:
+        os.makedirs(DB_FOLDER, exist_ok=True)
+        conn = sqlite3.connect(DB_FILE, factory=DatabaseConnection, timeout=15)
+        conn._maintenance_lock_held = True
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 15000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        return conn
+    except Exception:
+        DB_MAINTENANCE_LOCK.release()
+        raise
 
 
 def _add_column(cursor, table, definition):
