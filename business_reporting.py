@@ -3,6 +3,7 @@ import io
 from datetime import date, datetime, timedelta
 
 from database import get_connection
+from capital_service import capital_register, capital_summary
 from services import (
     batch_cost_rows, cash_balance, customer_outstanding, labour_due,
     mushroom_stock, pnl, raw_material_stock, supplier_outstanding,
@@ -31,7 +32,8 @@ def resolve_dates(start=None,end=None,quick=None):
             row=c.execute("""SELECT MIN(d),MAX(d) FROM (
                 SELECT sale_date d FROM sales UNION ALL SELECT purchase_date FROM purchases
                 UNION ALL SELECT expense_date FROM expenses UNION ALL SELECT production_date FROM daily_production
-                UNION ALL SELECT harvest_date FROM harvests) WHERE COALESCE(d,'')<>''""").fetchone()
+                UNION ALL SELECT harvest_date FROM harvests UNION ALL SELECT date FROM owner_capital)
+                WHERE COALESCE(d,'')<>''""").fetchone()
         start=start or row[0] or today.isoformat();end=end or row[1] or today.isoformat()
     try:
         a=datetime.strptime(start,"%Y-%m-%d").date();b=datetime.strptime(end,"%Y-%m-%d").date()
@@ -68,6 +70,8 @@ def report_view_model(start=None,end=None,quick=None):
         supplier_dues=[(r[0],supplier_outstanding(r[1],c)) for r in c.execute("SELECT name,id FROM suppliers ORDER BY name")]
         labour_dues=[(r[0],r[1]-r[2]-r[3]) for r in c.execute("""SELECT l.worker_name,l.amount,l.paid,
             COALESCE((SELECT SUM(p.amount) FROM labour_payments p WHERE p.labour_id=l.id),0) FROM labour l ORDER BY l.worker_name""")]
+        capital_rows=[tuple(r[1:]) for r in capital_register(start,end,c)]
+        capital=capital_summary(c)
         sales_total=sum(r[4] for r in sales);purchase_total=sum(r[6] for r in purchases);expense_total=sum(r[3] for r in expenses)
         saleable=sum(r[5] for r in production);harvest_saleable=sum(r[5] for r in harvest);wastage=sum(r[4] for r in harvest)+sum(r[4] for r in production)
         batches=[]
@@ -88,14 +92,28 @@ def report_view_model(start=None,end=None,quick=None):
         ("Supplier Due",("Supplier","Due"),[r for r in supplier_dues if r[1]>0]),
         ("Labour Due",("Worker","Due"),[r for r in labour_dues if r[1]>0]),
         ("Cash / Bank",("Account","Available"),[("Cash",cash),("Bank",bank),("Total",cash+bank)]),
+        ("Capital Report",("Date","Type","Reference","Cash","Bank","Total","Notes"),capital_rows),
         ("Profit Summary",("Sales","COGS","Gross","Expenses","Net","Margin %"),[tuple(profit[k] for k in ("sales","cogs","gross","expenses","net","margin"))]),
         ("Batch Report",("Batch","Total Cost","Harvest","Cost/Kg","Sales","P/L"),batches),
     ]
+    assets=cash+bank+customer_outstanding()
+    liabilities=supplier_outstanding()+labour_due()
+    equity=capital["closing"]+profit["net"]
+    sections.append(("Balance Sheet Foundation",("Section","Account","Amount"),[
+        ("Assets","Cash",cash),("Assets","Bank",bank),
+        ("Assets","Customer Receivables",customer_outstanding()),
+        ("Liabilities","Supplier Due",supplier_outstanding()),
+        ("Liabilities","Labour Due",labour_due()),
+        ("Equity","Owner Capital (net of drawings)",capital["closing"]),
+        ("Equity","Current Tested P&L",profit["net"]),
+        ("Reconciliation","Assets - Liabilities - Equity (unclassified gap)",assets-liabilities-equity),
+    ]))
     summary=[
         ("Sales",money(sales_total)),("Purchases",money(purchase_total)),("Expenses",money(expense_total)),("Net Profit",money(profit["net"])),
         ("Production",quantity(sum(r[3] for r in production))),("Saleable Harvest",quantity(harvest_saleable)),("Mushroom Stock",quantity(mushroom_stock())),("Wastage",quantity(wastage)),
         ("Customer Due",money(customer_outstanding())),("Supplier Due",money(supplier_outstanding())),("Labour Due",money(labour_due())),
         ("Cash",money(cash)),("Bank",money(bank)),("Total Available",money(cash+bank)),
+        ("Closing Owner Capital",money(capital["closing"])),
     ]
     return {"start":start,"end":end,"summary":summary,"sections":sections,"profit":profit}
 
@@ -122,8 +140,16 @@ def chart_view_model(start=None,end=None,period="Daily"):
         sold=_series(c,"sales","sale_date","quantity_kg",start,end,period)
         production=_series(c,"daily_production","production_date","production_kg",start,end,period)
         harvest=_series(c,"harvests","harvest_date","quantity_kg-wastage_kg",start,end,period)
-        income=_series(c,"cash_ledger","transaction_date","credit",start,end,period)
-        expense=_series(c,"cash_ledger","transaction_date","debit",start,end,period)
+        bucket=_bucket_expression("transaction_date",period)
+        excluded=("OPENING CAPITAL","CAPITAL INTRODUCED","DRAWINGS")
+        income={r[0]:float(r[1] or 0) for r in c.execute(
+            f"""SELECT {bucket},COALESCE(SUM(credit),0) FROM cash_ledger
+            WHERE transaction_date BETWEEN ? AND ? AND transaction_type NOT IN (?,?,?)
+            GROUP BY {bucket} ORDER BY {bucket}""",(start,end)+excluded)}
+        expense={r[0]:float(r[1] or 0) for r in c.execute(
+            f"""SELECT {bucket},COALESCE(SUM(debit),0) FROM cash_ledger
+            WHERE transaction_date BETWEEN ? AND ? AND transaction_type NOT IN (?,?,?)
+            GROUP BY {bucket} ORDER BY {bucket}""",(start,end)+excluded)}
         harvest_in=harvest
         adjustments=_series(c,"stock_transactions","transaction_date","quantity_kg",start,end,period)
         opening=float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_mushroom_stock'),'0')").fetchone()[0] or 0)

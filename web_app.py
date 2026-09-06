@@ -5,6 +5,9 @@ from flask import Flask, flash, redirect, render_template, request, session, url
 from database import authenticate, create_database, get_connection
 from invoice_pdf import generate_invoice_pdf_file
 from payment_service import record_payment
+from capital_service import (
+    capital_register, capital_summary, delete_capital, get_capital, save_capital,
+)
 from services import (
     customer_outstanding,
     generate_invoice_no,
@@ -54,7 +57,7 @@ def csrf_context():
     return {"csrf_token":session["csrf_token"],"navigation":nav}
 
 NAV_ITEMS=(
- ("🏠 Dashboard","dashboard","dashboard"),("🌱 Production","production","production.create"),("🍄 Harvest","harvest","harvest.create"),("📦 Stock","stock","stock.view"),("🛒 Sales","sales","sales.create"),("🧪 Raw Materials","raw_materials_web","raw_materials"),("🧺 Purchases","purchases_web","purchases"),("💰 Expenses","expenses_web","expenses"),("👥 Customers","customers_web","customers.view"),("🚚 Suppliers","suppliers_web","suppliers"),("👷 Labour","labour_web","labour"),("💳 Payments","payments_web","payments"),("🏦 Cash / Bank","ledger_web","ledger"),("🧮 Batch Cost","batch_cost_web","batch_cost"),("📈 Profit & Loss","pnl_web","reports"),("📊 Reports","reports_web","reports"),("📉 Charts","charts_web","charts"),("🧾 Invoices","invoices_web","sales.create"),("⚙ Settings","settings_web","settings"),("🔐 Users","users_web","users"),("💾 Backup / Restore","backup_web","backup_restore"))
+ ("🏠 Dashboard","dashboard","dashboard"),("🌱 Production","production","production.create"),("🍄 Harvest","harvest","harvest.create"),("📦 Stock","stock","stock.view"),("🛒 Sales","sales","sales.create"),("🧪 Raw Materials","raw_materials_web","raw_materials"),("🧺 Purchases","purchases_web","purchases"),("💰 Expenses","expenses_web","expenses"),("👥 Customers","customers_web","customers.view"),("🚚 Suppliers","suppliers_web","suppliers"),("👷 Labour","labour_web","labour"),("💳 Payments","payments_web","payments"),("🏦 Cash / Bank","ledger_web","ledger"),("💰 Capital","capital_web","capital"),("🧮 Batch Cost","batch_cost_web","batch_cost"),("📈 Profit & Loss","pnl_web","reports"),("📊 Reports","reports_web","reports"),("📉 Charts","charts_web","charts"),("🧾 Invoices","invoices_web","sales.create"),("⚙ Settings","settings_web","settings"),("🔐 Users","users_web","users"),("💾 Backup / Restore","backup_web","backup_restore"))
 
 
 def login_required(view):
@@ -121,7 +124,10 @@ def dashboard():
             "expenses":c.execute("SELECT COALESCE(SUM(amount),0) FROM expenses").fetchone()[0],
         }
         recent=c.execute("SELECT production_date,batch_no,production_kg,wastage_kg,saleable_kg FROM daily_production ORDER BY id DESC LIMIT 10").fetchall()
-    stats.update(stock=mushroom_stock(),customer_due=customer_outstanding(),supplier_due=supplier_outstanding(),net=pnl()["net"])
+    from services import cash_balance
+    stats.update(stock=mushroom_stock(),customer_due=customer_outstanding(),supplier_due=supplier_outstanding(),
+                 net=pnl()["net"],cash=cash_balance("Cash"),bank=cash_balance("Bank"))
+    stats["cash_bank"]=stats["cash"]+stats["bank"]
     return render_template("dashboard.html",stats=stats,recent=recent)
 
 
@@ -241,8 +247,9 @@ def ledger_web():
         rows=c.execute("SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger"+where+" ORDER BY transaction_date DESC,id DESC",params).fetchall()
         summary_rows=c.execute("SELECT transaction_date,transaction_type,reference,payment_mode,debit,credit FROM cash_ledger"+summary_where,summary_params).fetchall()
         types=[r[0] for r in c.execute("SELECT DISTINCT transaction_type FROM cash_ledger WHERE COALESCE(transaction_type,'')<>'' ORDER BY transaction_type")]
-        opening_cash=float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_cash'),'0')").fetchone()[0] or 0)
-        opening_bank=float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_bank'),'0')").fetchone()[0] or 0)
+        has_capital_opening=bool(c.execute("SELECT 1 FROM owner_capital WHERE kind='OPENING' LIMIT 1").fetchone())
+        opening_cash=0 if has_capital_opening else float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_cash'),'0')").fetchone()[0] or 0)
+        opening_bank=0 if has_capital_opening else float(c.execute("SELECT COALESCE((SELECT value FROM settings WHERE key='opening_bank'),'0')").fetchone()[0] or 0)
         prior_cash=prior_bank=0.0
         if start:
             prior_cash=c.execute("SELECT COALESCE(SUM(credit-debit),0) FROM cash_ledger WHERE transaction_date<? AND LOWER(payment_mode)='cash'",(start,)).fetchone()[0]
@@ -254,6 +261,77 @@ def ledger_web():
     cash=totals("Cash",opening_cash+prior_cash);bank=totals("Bank",opening_bank+prior_bank)
     summary={"Cash":cash,"Bank":bank,"Overall":{k:cash[k]+bank[k] for k in cash}}
     return render_template("module_web.html",title="Cash / Bank Ledger",headers=("Date","Type","Reference","Mode","Outflow","Inflow"),rows=rows,ledger_summary=summary,ledger_types=types)
+
+
+@app.route("/capital")
+@permission("capital")
+def capital_web():
+    rows=capital_register();summary=capital_summary()
+    return render_template("capital.html",title="Owner's Capital",rows=rows,summary=summary,
+                           has_opening=any(r[2]=="OPENING" for r in rows))
+
+
+def _capital_form_response(entry_id=None, opening=False):
+    row=get_capital(entry_id) if entry_id else None
+    if entry_id and not row:return "Capital entry not found",404
+    if request.method=="POST":
+        kind="OPENING" if opening else request.form.get("kind","")
+        if row and row[2]=="OPENING":kind="OPENING"
+        if not opening and not row and kind=="OPENING":
+            flash("Use Setup Opening Capital for the opening balance.","error")
+        else:
+            try:
+                saved=save_capital({
+                    "date":request.form.get("date",""),"kind":kind,
+                    "cash_amount":request.form.get("cash_amount",""),
+                    "bank_amount":request.form.get("bank_amount",""),
+                    "reference":request.form.get("reference",""),
+                    "notes":request.form.get("notes",""),
+                },entry_id)
+                flash("Capital entry saved.","success")
+                return redirect(url_for("capital_view",entry_id=saved))
+            except (ValueError,sqlite3.IntegrityError) as e:flash(str(e),"error")
+            except sqlite3.Error:
+                app.logger.exception("Capital transaction failed")
+                flash("Capital entry could not be saved; balances were unchanged.","error")
+        row=(entry_id,request.form.get("date",""),kind,
+             request.form.get("cash_amount",""),request.form.get("bank_amount",""),
+             request.form.get("reference",""),request.form.get("notes",""))
+    return render_template("capital_form.html",title="Setup Opening Capital" if opening else
+                           ("Edit Capital Entry" if entry_id else "New Capital Entry"),
+                           row=row,opening=opening or bool(row and row[2]=="OPENING"))
+
+
+@app.route("/capital/new",methods=["GET","POST"])
+@permission("capital.create")
+def capital_new():return _capital_form_response()
+
+
+@app.route("/capital/opening",methods=["GET","POST"])
+@permission("capital.create")
+def capital_opening():return _capital_form_response(opening=True)
+
+
+@app.route("/capital/<int:entry_id>")
+@permission("capital")
+def capital_view(entry_id):
+    row=get_capital(entry_id)
+    return render_template("capital_view.html",title="Capital Entry",row=row) if row else ("Capital entry not found",404)
+
+
+@app.route("/capital/<int:entry_id>/edit",methods=["GET","POST"])
+@permission("capital.edit")
+def capital_edit(entry_id):return _capital_form_response(entry_id)
+
+
+@app.route("/capital/<int:entry_id>/delete",methods=["POST"])
+@permission("capital.delete")
+def capital_delete(entry_id):
+    try:delete_capital(entry_id);flash("Capital entry deleted and balances reversed.","success")
+    except ValueError as e:flash(str(e),"error")
+    except sqlite3.Error:
+        app.logger.exception("Capital delete failed");flash("Capital entry could not be deleted; balances were unchanged.","error")
+    return redirect(url_for("capital_web"))
 
 @app.route("/batch-cost")
 @permission("batch_cost")
@@ -297,10 +375,18 @@ def settings_web():
             if any(float(request.form.get(k,0) or 0)<0 for k in ("opening_cash","opening_bank","opening_mushroom_stock","expected_rate")):raise ValueError
         except ValueError:
             flash("Opening balances and expected rate must be non-negative numbers.","error");return redirect(url_for("settings_web"))
-        with get_connection() as c:c.executemany("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[(k,request.form.get(k,"").strip()) for k in allowed])
+        with get_connection() as c:
+            has_opening=bool(c.execute("SELECT 1 FROM owner_capital WHERE kind='OPENING' LIMIT 1").fetchone())
+            if has_opening:
+                allowed=tuple(k for k in allowed if k not in ("opening_cash","opening_bank"))
+                flash("Opening cash and bank are managed from Owner's Capital and were not changed.","error")
+            c.executemany("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[(k,request.form.get(k,"").strip()) for k in allowed])
         flash("Settings saved.","success");return redirect(url_for("settings_web"))
-    with get_connection() as c:values=dict(c.execute("SELECT key,value FROM settings"))
-    return render_template("module_web.html",title="Settings",headers=(),rows=(),settings_values=values)
+    with get_connection() as c:
+        values=dict(c.execute("SELECT key,value FROM settings"))
+        opening_locked=bool(c.execute("SELECT 1 FROM owner_capital WHERE kind='OPENING' LIMIT 1").fetchone())
+    return render_template("module_web.html",title="Settings",headers=(),rows=(),settings_values=values,
+                           settings_opening_locked=opening_locked)
 
 @app.route("/users")
 @permission("users")

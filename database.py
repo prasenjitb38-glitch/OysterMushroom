@@ -341,6 +341,18 @@ def create_database():
             credit REAL DEFAULT 0,
             notes TEXT
         );
+        CREATE TABLE IF NOT EXISTS owner_capital (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('OPENING','INTRODUCED','DRAWING')),
+            cash_amount REAL NOT NULL DEFAULT 0 CHECK(cash_amount >= 0),
+            bank_amount REAL NOT NULL DEFAULT 0 CHECK(bank_amount >= 0),
+            reference TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK(cash_amount + bank_amount > 0)
+        );
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_time TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -441,6 +453,10 @@ def create_database():
         CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_ledger_source
         ON cash_ledger(source_table, source_id)
         WHERE source_table IS NOT NULL AND source_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_owner_capital_date ON owner_capital(date);
+        CREATE INDEX IF NOT EXISTS idx_owner_capital_kind ON owner_capital(kind);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_capital_one_opening
+        ON owner_capital(kind) WHERE kind='OPENING';
         CREATE INDEX IF NOT EXISTS idx_sales_batch_id ON sales(batch_id);
         CREATE INDEX IF NOT EXISTS idx_usage_material ON material_usage(material_id);
         CREATE INDEX IF NOT EXISTS idx_adjustment_material ON material_adjustments(material_id);

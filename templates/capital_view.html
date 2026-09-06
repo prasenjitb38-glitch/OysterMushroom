@@ -1,0 +1,4 @@
+{% extends 'base.html' %}{% block body %}
+{% if row %}<section class="hero"><h1>Capital Entry</h1><div class="tool-actions"><a class="action-button" href="{{url_for('capital_edit',entry_id=row[0])}}">Edit</a><a class="action-button" href="{{url_for('capital_web')}}">Back to Register</a></div></section>
+<div class="table"><table><tbody><tr><th>Date</th><td>{{row[1]}}</td></tr><tr><th>Type</th><td>{{{'OPENING':'Opening Capital','INTRODUCED':'Capital Introduced','DRAWING':'Drawings'}[row[2]]}}</td></tr><tr><th>Cash</th><td>₹{{'{:,.2f}'.format(row[3])}}</td></tr><tr><th>Bank</th><td>₹{{'{:,.2f}'.format(row[4])}}</td></tr><tr><th>Total</th><td>₹{{'{:,.2f}'.format(row[3]+row[4])}}</td></tr><tr><th>Reference</th><td>{{row[5]}}</td></tr><tr><th>Notes</th><td>{{row[6]}}</td></tr></tbody></table></div>{% endif %}
+{% endblock %}

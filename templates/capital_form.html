@@ -1,0 +1,13 @@
+{% extends 'base.html' %}{% block body %}
+<section class="hero"><h1>{{title}}</h1><p>Enter the cash and bank components. At least one must be greater than zero.</p></section>
+<form method="post" class="form" id="capital-form"><input type="hidden" name="csrf_token" value="{{csrf_token}}">
+<label>Date<input type="date" name="date" required value="{{row[1] if row else ''}}"></label>
+{% if opening %}<input type="hidden" name="kind" value="OPENING"><label>Transaction Type<input value="Opening Capital" disabled></label>{% else %}<label>Transaction Type<select name="kind" required><option value="INTRODUCED" {% if row and row[2]=='INTRODUCED' %}selected{% endif %}>Capital Introduced</option><option value="DRAWING" {% if row and row[2]=='DRAWING' %}selected{% endif %}>Drawings</option></select></label>{% endif %}
+<label>Cash Amount<input type="number" name="cash_amount" min="0" step="0.01" value="{{row[3] if row else '0'}}" required></label>
+<label>Bank Amount<input type="number" name="bank_amount" min="0" step="0.01" value="{{row[4] if row else '0'}}" required></label>
+<label>Total<input id="capital-total" value="₹0.00" readonly></label>
+<label>Reference (optional)<input name="reference" maxlength="200" value="{{row[5] if row else ''}}"></label>
+<label>Notes<textarea name="notes" rows="3">{{row[6] if row else ''}}</textarea></label>
+<button>Save Capital Entry</button></form>
+<script>const f=document.getElementById('capital-form'),t=document.getElementById('capital-total');function total(){t.value='₹'+((parseFloat(f.cash_amount.value)||0)+(parseFloat(f.bank_amount.value)||0)).toFixed(2)}f.cash_amount.addEventListener('input',total);f.bank_amount.addEventListener('input',total);total();</script>
+{% endblock %}

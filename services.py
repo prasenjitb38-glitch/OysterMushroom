@@ -64,9 +64,17 @@ def labour_due(conn=None):
 def cash_balance(mode="All", conn=None):
     own = conn is None; conn = conn or get_connection()
     normalized = (mode or "All").strip().lower()
-    if normalized == "cash": opening = float(setting("opening_cash", "0") or 0); modes=("Cash",)
-    elif normalized in ("bank", "upi"): opening = float(setting("opening_bank", "0") or 0); modes=("Bank","UPI")
-    else: opening = float(setting("opening_cash", "0") or 0)+float(setting("opening_bank", "0") or 0); modes=()
+    has_capital_opening = bool(conn.execute(
+        "SELECT 1 FROM owner_capital WHERE kind='OPENING' LIMIT 1"
+    ).fetchone())
+    settings = dict(conn.execute(
+        "SELECT key,value FROM settings WHERE key IN ('opening_cash','opening_bank')"
+    ))
+    cash_opening = 0 if has_capital_opening else float(settings.get("opening_cash", "0") or 0)
+    bank_opening = 0 if has_capital_opening else float(settings.get("opening_bank", "0") or 0)
+    if normalized == "cash": opening = cash_opening; modes=("Cash",)
+    elif normalized in ("bank", "upi"): opening = bank_opening; modes=("Bank","UPI")
+    else: opening = cash_opening + bank_opening; modes=()
     where = "" if not modes else " WHERE payment_mode IN ("+",".join("?" for _ in modes)+")"
     params = modes
     debit, credit = conn.execute(
@@ -148,7 +156,7 @@ def pnl(start=None, end=None):
 
 PERMISSIONS={
  "ADMIN":{"*"},
- "MANAGER":{"dashboard","production","harvest","stock","sales","customers","suppliers","labour","raw_materials","purchases","expenses","payments","ledger","batch_cost","reports","charts"},
+ "MANAGER":{"dashboard","production","harvest","stock","sales","customers","suppliers","labour","raw_materials","purchases","expenses","payments","ledger","capital","batch_cost","reports","charts"},
  "STAFF":{"dashboard","production.create","harvest.create","sales.create","customers.view","stock.view"},
 }
 _desktop_role="ADMIN"

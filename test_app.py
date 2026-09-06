@@ -22,7 +22,7 @@ class AppTests(unittest.TestCase):
 
     def setUp(self):
         with database.get_connection() as c:
-            for table in ("customer_payments","supplier_payments","labour_payments","cash_ledger","sales","harvests","daily_production","purchases","expenses","labour","material_usage","material_adjustments","customers","suppliers","batches","stock_transactions"):
+            for table in ("customer_payments","supplier_payments","labour_payments","cash_ledger","owner_capital","sales","harvests","daily_production","purchases","expenses","labour","material_usage","material_adjustments","customers","suppliers","batches","stock_transactions"):
                 c.execute(f"DELETE FROM {table}")
             c.execute("UPDATE settings SET value='0' WHERE key IN ('opening_mushroom_stock','expected_rate','opening_cash','opening_bank')")
             c.execute("UPDATE raw_materials SET opening_stock=0,reorder_level=0")
@@ -312,7 +312,7 @@ class AppTests(unittest.TestCase):
         client=web_app.app.test_client()
         expected={
             "ADMIN":{item[1] for item in web_app.NAV_ITEMS},
-            "MANAGER":{"dashboard","production","harvest","stock","sales","raw_materials_web","purchases_web","expenses_web","customers_web","suppliers_web","labour_web","payments_web","ledger_web","batch_cost_web","pnl_web","reports_web","charts_web","invoices_web"},
+            "MANAGER":{"dashboard","production","harvest","stock","sales","raw_materials_web","purchases_web","expenses_web","customers_web","suppliers_web","labour_web","payments_web","ledger_web","capital_web","batch_cost_web","pnl_web","reports_web","charts_web","invoices_web"},
             "STAFF":{"dashboard","production","harvest","stock","sales","customers_web","invoices_web"},
         }
         rules={rule.endpoint:rule.rule for rule in web_app.app.url_map.iter_rules() if "<" not in rule.rule}
@@ -702,6 +702,79 @@ print('web-safe')
         with database.get_connection() as outer:
             with database.get_connection() as inner:self.assertEqual(inner.execute("SELECT 1").fetchone()[0],1)
             self.assertEqual(outer.execute("SELECT 1").fetchone()[0],1)
+
+    def test_owner_capital_complete_lifecycle_and_pnl_isolation(self):
+        from capital_service import capital_summary,delete_capital,save_capital
+        before=self.services.pnl()
+        opening=save_capital({"date":"2026-09-01","kind":"OPENING","cash_amount":20000,"bank_amount":80000})
+        introduced=save_capital({"date":"2026-09-02","kind":"INTRODUCED","cash_amount":10000,"bank_amount":20000,"reference":"CAP-1"})
+        drawing=save_capital({"date":"2026-09-03","kind":"DRAWING","cash_amount":5000,"bank_amount":0})
+        self.assertEqual(capital_summary(),{"opening":100000.0,"introduced":30000.0,"drawings":5000.0,"closing":125000.0})
+        self.assertEqual((self.services.cash_balance("Cash"),self.services.cash_balance("Bank")),(25000,100000))
+        self.assertEqual(self.services.pnl(),before)
+        with database.get_connection() as c:
+            rows=c.execute("SELECT transaction_type,payment_mode,debit,credit,source_table FROM cash_ledger ORDER BY id").fetchall()
+            self.assertEqual(len(rows),5);self.assertEqual(len({r[4] for r in rows}),5)
+            self.assertEqual(dict(c.execute("SELECT key,value FROM settings WHERE key IN ('opening_cash','opening_bank')")),{"opening_cash":"20000.0","opening_bank":"80000.0"})
+        save_capital({"date":"2026-09-04","kind":"INTRODUCED","cash_amount":0,"bank_amount":5000},introduced)
+        self.assertEqual((self.services.cash_balance("Cash"),self.services.cash_balance("Bank")),(15000,85000))
+        delete_capital(drawing);self.assertEqual(self.services.cash_balance("Cash"),20000)
+        save_capital({"date":"2026-09-01","kind":"OPENING","cash_amount":1000,"bank_amount":2000},opening)
+        self.assertEqual((self.services.cash_balance("Cash"),self.services.cash_balance("Bank")),(1000,7000))
+        with self.assertRaises(ValueError):save_capital({"date":"2026-09-05","kind":"OPENING","cash_amount":1,"bank_amount":0})
+        delete_capital(opening)
+        with database.get_connection() as c:self.assertEqual(dict(c.execute("SELECT key,value FROM settings WHERE key IN ('opening_cash','opening_bank')")),{"opening_cash":"0","opening_bank":"0"})
+        self.assertEqual(self.services.pnl(),before)
+
+    def test_capital_validation_reports_charts_and_web_permissions(self):
+        from capital_service import save_capital
+        from business_reporting import chart_view_model,report_view_model
+        for data in (
+            {"date":"bad","kind":"INTRODUCED","cash_amount":1,"bank_amount":0},
+            {"date":"2026-09-01","kind":"OTHER","cash_amount":1,"bank_amount":0},
+            {"date":"2026-09-01","kind":"DRAWING","cash_amount":0,"bank_amount":0},
+            {"date":"2026-09-01","kind":"DRAWING","cash_amount":-1,"bank_amount":0},
+        ):
+            with self.assertRaises(ValueError):save_capital(data)
+        save_capital({"date":"2026-09-01","kind":"OPENING","cash_amount":20,"bank_amount":80})
+        save_capital({"date":"2026-09-02","kind":"INTRODUCED","cash_amount":10,"bank_amount":20})
+        save_capital({"date":"2026-09-03","kind":"DRAWING","cash_amount":5,"bank_amount":10})
+        model=report_view_model("2026-09-01","2026-09-30")
+        self.assertIn("Capital Report",[s[0] for s in model["sections"]]);self.assertIn("Balance Sheet Foundation",[s[0] for s in model["sections"]])
+        chart=next(x for x in chart_view_model("2026-09-01","2026-09-30")["charts"] if x["title"]=="Income vs Expense")
+        self.assertEqual(sum(chart["datasets"][0]["data"]),0);self.assertEqual(sum(chart["datasets"][1]["data"]),0)
+        import web_app
+        client=web_app.app.test_client()
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Staff","role":"STAFF","must_change_password":False};s["csrf_token"]="capital-token"
+        self.assertEqual(client.get("/capital").status_code,403)
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Manager","role":"MANAGER","must_change_password":False}
+        page=client.get("/capital");self.assertEqual(page.status_code,200);self.assertIn("Closing Capital",page.get_data(as_text=True))
+        self.assertEqual(client.post("/capital/new",data={"date":"2026-09-04","kind":"INTRODUCED","cash_amount":"1","bank_amount":"0"}).status_code,400)
+        invalid=client.post("/capital/new",data={"csrf_token":"capital-token","date":"bad","kind":"INTRODUCED","cash_amount":"1","bank_amount":"0"})
+        self.assertEqual(invalid.status_code,200);self.assertIn("YYYY-MM-DD",invalid.get_data(as_text=True))
+        saved=client.post("/capital/new",data={"csrf_token":"capital-token","date":"2026-09-04","kind":"INTRODUCED","cash_amount":"1","bank_amount":"0","reference":"&lt;script&gt;","notes":"<script>alert(1)</script>"})
+        self.assertEqual(saved.status_code,302)
+        listing=client.get("/capital").get_data(as_text=True);self.assertNotIn("<script>alert(1)</script>",listing)
+        with client.session_transaction() as s:s["user"]={"id":1,"name":"Admin","role":"ADMIN","must_change_password":False}
+        settings=client.post("/settings",data={"csrf_token":"capital-token","opening_cash":"999","opening_bank":"999","opening_mushroom_stock":"0","expected_rate":"0"},follow_redirects=True)
+        self.assertEqual(settings.status_code,200)
+        with database.get_connection() as c:self.assertEqual(c.execute("SELECT value FROM settings WHERE key='opening_cash'").fetchone()[0],"20.0")
+
+    def test_capital_component_edit_delete_reconciliation(self):
+        from capital_service import delete_capital,save_capital
+        for kind in ("INTRODUCED","DRAWING"):
+            for component in ("cash_amount","bank_amount"):
+                data={"date":"2026-09-05","kind":kind,"cash_amount":0,"bank_amount":0}
+                data[component]=40
+                entry=save_capital(data)
+                expected=40 if kind=="INTRODUCED" else -40
+                mode="Cash" if component=="cash_amount" else "Bank"
+                self.assertEqual(self.services.cash_balance(mode),expected)
+                data[component]=15;save_capital(data,entry)
+                self.assertEqual(self.services.cash_balance(mode),15 if kind=="INTRODUCED" else -15)
+                with database.get_connection() as c:
+                    self.assertEqual(c.execute("SELECT COUNT(*) FROM cash_ledger WHERE source_id=? AND source_table LIKE 'owner_capital_%'",(entry,)).fetchone()[0],1)
+                delete_capital(entry);self.assertEqual(self.services.cash_balance(mode),0)
 
     def test_gui_pages(self):
         try:
